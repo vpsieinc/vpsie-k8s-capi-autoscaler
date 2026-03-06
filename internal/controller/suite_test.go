@@ -2,10 +2,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -71,12 +71,15 @@ func TestMain(m *testing.M) {
 }
 
 func findCAPICRDPath() string {
-	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	out, err := exec.Command("go", "list", "-m", "-json", "sigs.k8s.io/cluster-api").CombinedOutput()
 	if err != nil {
-		panic("failed to run go env GOMODCACHE: " + err.Error())
+		panic("failed to resolve CAPI module path: " + string(out))
 	}
-	modCache := strings.TrimSpace(string(out))
-	return filepath.Join(modCache, "sigs.k8s.io", "cluster-api@v1.12.3", "config", "crd", "bases")
+	var modInfo struct{ Dir string }
+	if err := json.Unmarshal(out, &modInfo); err != nil {
+		panic("failed to parse CAPI module info: " + err.Error())
+	}
+	return filepath.Join(modInfo.Dir, "config", "crd", "bases")
 }
 
 func findCAPVCRDPath() string {
@@ -85,18 +88,18 @@ func findCAPVCRDPath() string {
 	if _, err := os.Stat(localPath); err == nil {
 		return localPath
 	}
-	// Fall back to the Go module cache (for CI).
-	// The replace directive maps to github.com/vpsieinc/cluster-api-provider-vpsie-2.
-	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	// Fall back to resolving the module directory via go list (for CI).
+	out, err := exec.Command("go", "list", "-m", "-json", "github.com/vpsieinc/cluster-api-provider-vpsie").CombinedOutput()
 	if err != nil {
-		panic("failed to run go env GOMODCACHE: " + err.Error())
+		panic("failed to resolve CAPV module path: " + string(out))
 	}
-	modCache := strings.TrimSpace(string(out))
-	// Find the actual version directory in the module cache.
-	pattern := filepath.Join(modCache, "github.com", "vpsieinc", "cluster-api-provider-vpsie-2@*", "config", "crd", "bases")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) > 0 {
-		return matches[0]
+	var modInfo struct{ Dir string }
+	if err := json.Unmarshal(out, &modInfo); err != nil {
+		panic("failed to parse module info: " + err.Error())
 	}
-	panic("CAPV CRDs not found in module cache; run 'go mod download' first")
+	crdPath := filepath.Join(modInfo.Dir, "config", "crd", "bases")
+	if _, err := os.Stat(crdPath); err != nil {
+		panic("CAPV CRDs not found at " + crdPath + ": " + err.Error())
+	}
+	return crdPath
 }
