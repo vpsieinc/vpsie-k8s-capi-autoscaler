@@ -1,0 +1,22 @@
+apiVersion: optimization.vpsie.com/v1alpha1
+kind: ScalingPolicy
+metadata:
+  name: zotalos-workers
+  namespace: default
+spec:
+  targetRef:
+    name: zotalos-workers
+  credentialsRef:
+    name: capv-credentials
+  dcIdentifier: "eb8ac92d-9d4d-11ee-9444-7e0140123655"
+  osIdentifier: "ae23be00-0b8d-11f1-bac6-bc24115e1e5f"
+  aggressiveness: moderate
+  dryRun: true
+  targetUtilization:
+    scaleUpThreshold: 75
+    scaleDownThreshold: 5
+  constraints:
+    minCPU: 1
+    maxCPU: 8
+    minRAM: 1024
+    maxRAM: 16384

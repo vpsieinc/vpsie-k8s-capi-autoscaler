@@ -1,0 +1,382 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.0
+  name: scalingpolicies.optimization.vpsie.com
+spec:
+  group: optimization.vpsie.com
+  names:
+    kind: ScalingPolicy
+    listKind: ScalingPolicyList
+    plural: scalingpolicies
+    shortNames:
+    - sp
+    singular: scalingpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Target MachineDeployment
+      jsonPath: .spec.targetRef.name
+      name: Target
+      type: string
+    - description: Current phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: Current VM plan
+      jsonPath: .status.currentPlan.nickname
+      name: Current Plan
+      type: string
+    - description: Recommended VM plan
+      jsonPath: .status.recommendedPlan.nickname
+      name: Recommended
+      type: string
+    - description: Estimated monthly savings
+      jsonPath: .status.estimatedMonthlySavings
+      name: Savings
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ScalingPolicy is the Schema for the scalingpolicies API.
+          It defines cost optimization rules for a MachineDeployment's worker nodes.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ScalingPolicySpec defines the desired state of ScalingPolicy.
+            properties:
+              aggressiveness:
+                default: moderate
+                description: Aggressiveness controls cost optimization aggressiveness.
+                enum:
+                - conservative
+                - moderate
+                - aggressive
+                type: string
+              allowedCategories:
+                description: |-
+                  AllowedCategories lists plan category names to consider.
+                  Empty means all categories are allowed.
+                  Controller resolves names to UUIDs via GET /api/v2/plans/category.
+                items:
+                  type: string
+                type: array
+              constraints:
+                description: Constraints defines resource boundaries for plan selection.
+                properties:
+                  excludedPlans:
+                    description: ExcludedPlans is a list of plan identifiers to exclude
+                      from selection.
+                    items:
+                      type: string
+                    type: array
+                  maxCPU:
+                    default: 32
+                    description: MaxCPU is the maximum number of vCPUs.
+                    type: integer
+                  maxRAM:
+                    default: 131072
+                    description: MaxRAM is the maximum RAM in MB.
+                    type: integer
+                  minCPU:
+                    default: 1
+                    description: MinCPU is the minimum number of vCPUs.
+                    type: integer
+                  minRAM:
+                    default: 1024
+                    description: MinRAM is the minimum RAM in MB.
+                    type: integer
+                  minSSD:
+                    default: 20
+                    description: MinSSD is the minimum SSD in GB.
+                    type: integer
+                type: object
+              credentialsRef:
+                description: |-
+                  CredentialsRef is the VPSie API key Secret.
+                  Falls back to the VPSieCluster's credentialsRef if not set.
+                properties:
+                  name:
+                    description: Name is the name of the Secret. Must contain an "apiKey"
+                      key.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the Secret.
+                    type: string
+                required:
+                - name
+                type: object
+              dcIdentifier:
+                description: DCIdentifier is the datacenter identifier for plan lookups.
+                minLength: 1
+                type: string
+              dryRun:
+                default: false
+                description: DryRun enables log-only mode without making changes.
+                type: boolean
+              osIdentifier:
+                description: OSIdentifier is the image identifier for plan lookups.
+                minLength: 1
+                type: string
+              planRefreshInterval:
+                description: PlanRefreshInterval is how often to refresh pricing data.
+                type: string
+              rebalancing:
+                description: Rebalancing configures periodic node rebalancing.
+                properties:
+                  cooldownPeriod:
+                    description: |-
+                      CooldownPeriod is the minimum time between rebalancing operations.
+                      Defaults vary by aggressiveness: 30m (conservative), 15m (moderate), 5m (aggressive).
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enabled controls whether periodic rebalancing is
+                      active.
+                    type: boolean
+                  maxConcurrentReplacements:
+                    default: 1
+                    description: MaxConcurrentReplacements is the maximum number of
+                      nodes being replaced simultaneously.
+                    type: integer
+                  minSavingsPercent:
+                    default: 15
+                    description: MinSavingsPercent is the minimum cost savings required
+                      to trigger a rebalance.
+                    type: integer
+                type: object
+              targetRef:
+                description: TargetRef references the MachineDeployment to optimize.
+                properties:
+                  name:
+                    description: Name is the name of the MachineDeployment.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the MachineDeployment.
+                      If empty, defaults to the ScalingPolicy's namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              targetUtilization:
+                description: TargetUtilization defines CPU/memory utilization thresholds.
+                properties:
+                  scaleDownThreshold:
+                    default: 5
+                    description: |-
+                      ScaleDownThreshold is the utilization percentage below which downscaling is triggered.
+                      Both CPU AND memory must be below this threshold, and scheduling simulation must pass.
+                    maximum: 99
+                    minimum: 0
+                    type: integer
+                  scaleUpThreshold:
+                    default: 75
+                    description: |-
+                      ScaleUpThreshold is the utilization percentage above which upscaling is triggered.
+                      If CPU OR memory exceeds this threshold, a bigger VM plan is selected.
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                type: object
+            required:
+            - dcIdentifier
+            - osIdentifier
+            - targetRef
+            type: object
+          status:
+            description: ScalingPolicyStatus defines the observed state of ScalingPolicy.
+            properties:
+              availableCategories:
+                description: AvailableCategories lists discovered plan category names
+                  from the API.
+                items:
+                  type: string
+                type: array
+              conditions:
+                description: Conditions defines current state of the ScalingPolicy.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentPlan:
+                description: CurrentPlan is the plan currently used by the MachineDeployment.
+                properties:
+                  cpu:
+                    description: CPU is the number of vCPUs.
+                    type: integer
+                  identifier:
+                    description: Identifier is the VPSie plan identifier (UUID).
+                    type: string
+                  nickname:
+                    description: Nickname is the human-readable plan name.
+                    type: string
+                  priceMonthly:
+                    description: PriceMonthly is the monthly price in USD.
+                    type: number
+                  ram:
+                    description: RAM is the amount of RAM in MB.
+                    type: integer
+                  ssd:
+                    description: SSD is the amount of SSD storage in GB.
+                    type: integer
+                required:
+                - cpu
+                - identifier
+                - priceMonthly
+                - ram
+                - ssd
+                type: object
+              currentUtilization:
+                description: CurrentUtilization reports the observed utilization of
+                  the workload cluster.
+                properties:
+                  cpuPercent:
+                    description: CPUPercent is the observed CPU utilization percentage.
+                    type: integer
+                  lastUpdated:
+                    description: LastUpdated is the timestamp of the last utilization
+                      measurement.
+                    format: date-time
+                    type: string
+                  memoryPercent:
+                    description: MemoryPercent is the observed memory utilization
+                      percentage.
+                    type: integer
+                  source:
+                    description: 'Source indicates how utilization was measured: "requests",
+                      "metrics", or "both".'
+                    type: string
+                required:
+                - cpuPercent
+                - lastUpdated
+                - memoryPercent
+                - source
+                type: object
+              estimatedMonthlySavings:
+                description: EstimatedMonthlySavings is the estimated monthly cost
+                  savings.
+                type: string
+              lastPlanRefreshTime:
+                description: LastPlanRefreshTime is the timestamp of the last pricing
+                  data refresh.
+                format: date-time
+                type: string
+              lastRebalanceTime:
+                description: LastRebalanceTime is the timestamp of the last rebalancing
+                  operation.
+                format: date-time
+                type: string
+              phase:
+                description: Phase is the current phase of the ScalingPolicy.
+                type: string
+              recommendedPlan:
+                description: RecommendedPlan is the plan the controller recommends
+                  switching to.
+                properties:
+                  cpu:
+                    description: CPU is the number of vCPUs.
+                    type: integer
+                  identifier:
+                    description: Identifier is the VPSie plan identifier (UUID).
+                    type: string
+                  nickname:
+                    description: Nickname is the human-readable plan name.
+                    type: string
+                  priceMonthly:
+                    description: PriceMonthly is the monthly price in USD.
+                    type: number
+                  ram:
+                    description: RAM is the amount of RAM in MB.
+                    type: integer
+                  ssd:
+                    description: SSD is the amount of SSD storage in GB.
+                    type: integer
+                required:
+                - cpu
+                - identifier
+                - priceMonthly
+                - ram
+                - ssd
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

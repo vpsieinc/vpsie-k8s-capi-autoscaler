@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VPSie Cluster Scaler — Architecture &amp; Implementation Status</title>
+<style>
+  :root {
+    --done: #22c55e;
+    --done-bg: #dcfce7;
+    --partial: #f59e0b;
+    --partial-bg: #fef3c7;
+    --todo: #ef4444;
+    --todo-bg: #fee2e2;
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #334155;
+    --border: #475569;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --accent: #38bdf8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.3rem; margin: 2rem 0 1rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: .4rem; }
+  h3 { font-size: 1rem; margin: 1.2rem 0 .6rem; color: var(--text-dim); }
+  .subtitle { color: var(--text-dim); font-size: .95rem; margin-bottom: 2rem; }
+
+  /* ── Progress bar ── */
+  .overall { display: flex; align-items: center; gap: 1rem; margin: 1.5rem 0 2.5rem; }
+  .progress-bar { flex: 1; height: 28px; background: var(--surface); border-radius: 14px; overflow: hidden; position: relative; }
+  .progress-fill { height: 100%; border-radius: 14px; transition: width .6s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; font-weight: 700; font-size: .85rem; color: #fff; }
+  .progress-fill.done { background: linear-gradient(90deg, #16a34a, #22c55e); }
+  .progress-fill.partial { background: linear-gradient(90deg, #d97706, #f59e0b); }
+  .pct-label { font-size: 1.5rem; font-weight: 800; min-width: 60px; text-align: right; }
+
+  /* ── Legend ── */
+  .legend { display: flex; gap: 1.5rem; margin-bottom: 2rem; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: .4rem; font-size: .85rem; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+  .legend-dot.done { background: var(--done); }
+  .legend-dot.partial { background: var(--partial); }
+  .legend-dot.todo { background: var(--todo); }
+
+  /* ── Dependency diagram ── */
+  .diagram-wrap { overflow-x: auto; margin: 1rem 0 2rem; }
+  svg { display: block; margin: 0 auto; }
+  svg text { font-family: 'Inter', -apple-system, sans-serif; }
+
+  /* ── Component grid ── */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(370px, 1fr)); gap: 1rem; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 4px; height: 100%;
+  }
+  .card.done::before { background: var(--done); }
+  .card.partial::before { background: var(--partial); }
+  .card.todo::before { background: var(--todo); }
+  .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: .5rem; }
+  .card-title { font-weight: 700; font-size: .95rem; }
+  .badge {
+    font-size: .7rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .badge.done { background: var(--done-bg); color: #166534; }
+  .badge.partial { background: var(--partial-bg); color: #92400e; }
+  .badge.todo { background: var(--todo-bg); color: #991b1b; }
+  .card-path { font-size: .8rem; color: var(--text-dim); font-family: 'SF Mono', 'Fira Code', monospace; margin-bottom: .5rem; }
+  .card-desc { font-size: .85rem; color: var(--text-dim); }
+  .card-files { margin-top: .5rem; font-size: .8rem; }
+  .card-files li { list-style: none; padding: 2px 0; display: flex; align-items: center; gap: .4rem; }
+  .card-files li::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .card-files li.done::before { background: var(--done); }
+  .card-files li.partial::before { background: var(--partial); }
+  .card-files li.todo::before { background: var(--todo); }
+  .file-name { font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); }
+  .file-note { color: var(--text-dim); }
+
+  /* ── Feature matrix ── */
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .85rem; }
+  th, td { padding: .5rem .75rem; text-align: left; border-bottom: 1px solid var(--surface2); }
+  th { color: var(--text-dim); font-weight: 600; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; }
+  tr:hover { background: var(--surface); }
+  .status-icon { font-size: 1.1rem; }
+
+  /* ── Info box ── */
+  .info-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.2rem; margin: 1rem 0; font-size: .85rem; }
+  .info-box h3 { color: var(--accent); margin-bottom: .5rem; }
+  .info-box ul { padding-left: 1.2rem; }
+  .info-box li { margin: .3rem 0; }
+  .info-box code { background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-size: .8rem; }
+
+  /* ── Responsive ── */
+  @media (max-width: 800px) {
+    body { padding: 1rem; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>VPSie Cluster Scaler</h1>
+<p class="subtitle">Architecture, dependency map &amp; implementation status — <code>optimization.vpsie.com/v1alpha1</code></p>
+
+<!-- ─── Overall progress ─── -->
+<div class="overall">
+  <span class="pct-label" style="color:var(--done)">97%</span>
+  <div class="progress-bar">
+    <div class="progress-fill done" style="width:97%">core + utilization complete</div>
+  </div>
+</div>
+
+<div class="legend">
+  <span class="legend-item"><span class="legend-dot done"></span> Done — implemented &amp; tested</span>
+  <span class="legend-item"><span class="legend-dot partial"></span> Partial — functional but gaps remain</span>
+  <span class="legend-item"><span class="legend-dot todo"></span> Not started</span>
+</div>
+
+<!-- ─── Dependency diagram (SVG) ─── -->
+<h2>Dependency Diagram</h2>
+<div class="diagram-wrap">
+<svg width="1020" height="820" viewBox="0 0 1020 820" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6z" fill="#22c55e"/>
+    </marker>
+    <marker id="arrowCyan" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6z" fill="#38bdf8"/>
+    </marker>
+    <filter id="glow"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+
+  <!-- Background grid -->
+  <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+    <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+  </pattern>
+  <rect width="1020" height="820" fill="url(#grid)"/>
+
+  <!-- ── External dependencies (top) ── -->
+  <g transform="translate(40,30)">
+    <rect x="0" y="0" width="140" height="40" rx="6" fill="#1e293b" stroke="#475569"/>
+    <text x="70" y="25" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">CAPI v1beta2</text>
+  </g>
+  <g transform="translate(200,30)">
+    <rect x="0" y="0" width="140" height="40" rx="6" fill="#1e293b" stroke="#475569"/>
+    <text x="70" y="25" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">CAPV v1alpha1</text>
+  </g>
+  <g transform="translate(360,30)">
+    <rect x="0" y="0" width="140" height="40" rx="6" fill="#1e293b" stroke="#475569"/>
+    <text x="70" y="25" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">VPSie API</text>
+  </g>
+  <g transform="translate(520,30)">
+    <rect x="0" y="0" width="140" height="40" rx="6" fill="#1e293b" stroke="#475569"/>
+    <text x="70" y="25" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Prometheus</text>
+  </g>
+  <g transform="translate(700,30)">
+    <rect x="0" y="0" width="180" height="40" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+    <text x="90" y="25" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="600">Workload Cluster API</text>
+  </g>
+
+  <!-- ── cmd/main.go ── -->
+  <g transform="translate(320,110)">
+    <rect x="0" y="0" width="260" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2" filter="url(#glow)"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">cmd/main.go</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Manager + WorkloadClientFactory wiring</text>
+  </g>
+
+  <!-- ── api/v1alpha1 ── -->
+  <g transform="translate(30,210)">
+    <rect x="0" y="0" width="220" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">api/v1alpha1</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">CRD + UtilizationSpec/Status + conditions</text>
+  </g>
+
+  <!-- ── internal/controller ── -->
+  <g transform="translate(290,210)">
+    <rect x="0" y="0" width="280" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/controller</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + determineDirection()</text>
+  </g>
+
+  <!-- ── internal/metrics ── -->
+  <g transform="translate(620,210)">
+    <rect x="0" y="0" width="220" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/metrics</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">8 Prometheus counters/gauges/histograms</text>
+  </g>
+
+  <!-- ── internal/pricing ── -->
+  <g transform="translate(80,350)">
+    <rect x="0" y="0" width="220" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/pricing</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Cache + Scorer (weights, capacity)</text>
+  </g>
+
+  <!-- ── internal/selector ── -->
+  <g transform="translate(350,350)">
+    <rect x="0" y="0" width="260" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/selector</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">ScalingDirection + Filter + Fit + Score</text>
+  </g>
+
+  <!-- ── internal/workload ── (NEW) -->
+  <g transform="translate(660,350)">
+    <rect x="0" y="0" width="250" height="50" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#38bdf8"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/workload</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">CAPI kubeconfig + node/pod/metrics access</text>
+  </g>
+
+  <!-- ── internal/utilization ── (NEW) -->
+  <g transform="translate(440,480)">
+    <rect x="0" y="0" width="260" height="50" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#38bdf8"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/utilization</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Calculator + threshold evaluation</text>
+  </g>
+
+  <!-- ── internal/scheduler ── (NEW) -->
+  <g transform="translate(740,480)">
+    <rect x="0" y="0" width="240" height="50" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#38bdf8"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/scheduler</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Downscale simulation + bin packing</text>
+  </g>
+
+  <!-- ── internal/vpsie ── -->
+  <g transform="translate(140,480)">
+    <rect x="0" y="0" width="240" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="16" cy="25" r="6" fill="#22c55e"/>
+    <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/vpsie</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">PricingClient — HTTP + Vpsie-Auth</text>
+  </g>
+
+  <!-- ── Config / CI row ── -->
+  <g transform="translate(60,760)">
+    <rect x="0" y="0" width="160" height="40" rx="6" fill="#1e293b" stroke="#22c55e" stroke-width="1.5"/>
+    <circle cx="14" cy="20" r="5" fill="#22c55e"/>
+    <text x="26" y="24" fill="#e2e8f0" font-size="11" font-weight="600">config/ (kustomize)</text>
+  </g>
+  <g transform="translate(250,760)">
+    <rect x="0" y="0" width="160" height="40" rx="6" fill="#1e293b" stroke="#22c55e" stroke-width="1.5"/>
+    <circle cx="14" cy="20" r="5" fill="#22c55e"/>
+    <text x="26" y="24" fill="#e2e8f0" font-size="11" font-weight="600">CRD YAML</text>
+  </g>
+  <g transform="translate(440,760)">
+    <rect x="0" y="0" width="160" height="40" rx="6" fill="#1e293b" stroke="#22c55e" stroke-width="1.5"/>
+    <circle cx="14" cy="20" r="5" fill="#22c55e"/>
+    <text x="26" y="24" fill="#e2e8f0" font-size="11" font-weight="600">RBAC (generated)</text>
+  </g>
+  <g transform="translate(630,760)">
+    <rect x="0" y="0" width="160" height="40" rx="6" fill="#1e293b" stroke="#22c55e" stroke-width="1.5"/>
+    <circle cx="14" cy="20" r="5" fill="#22c55e"/>
+    <text x="26" y="24" fill="#e2e8f0" font-size="11" font-weight="600">CI / Dockerfile</text>
+  </g>
+
+  <!-- ── Arrows ── -->
+  <!-- main → controller -->
+  <line x1="450" y1="160" x2="430" y2="208" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- main → api -->
+  <line x1="360" y1="160" x2="200" y2="208" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- main → metrics -->
+  <line x1="540" y1="160" x2="680" y2="208" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- main → workload -->
+  <line x1="560" y1="140" x2="720" y2="348" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+
+  <!-- controller → pricing -->
+  <line x1="360" y1="260" x2="250" y2="348" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- controller → selector -->
+  <line x1="460" y1="260" x2="470" y2="348" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- controller → metrics -->
+  <line x1="570" y1="235" x2="618" y2="235" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- controller → api -->
+  <line x1="290" y1="235" x2="252" y2="235" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- controller → workload (new) -->
+  <line x1="540" y1="260" x2="730" y2="348" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+  <!-- controller → utilization (new) -->
+  <line x1="480" y1="260" x2="540" y2="478" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+  <!-- controller → scheduler (new) -->
+  <line x1="520" y1="260" x2="820" y2="478" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+
+  <!-- selector → pricing (scorer) -->
+  <line x1="400" y1="400" x2="300" y2="380" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <!-- selector → api -->
+  <line x1="410" y1="350" x2="210" y2="262" stroke="#64748b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- pricing → vpsie -->
+  <line x1="230" y1="400" x2="260" y2="478" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <!-- utilization → workload (new) -->
+  <line x1="560" y1="480" x2="730" y2="400" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+
+  <!-- scheduler → utilization types -->
+  <line x1="770" y1="505" x2="702" y2="505" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowCyan)"/>
+
+  <!-- workload → Workload Cluster API (ext) -->
+  <line x1="830" y1="350" x2="830" y2="72" stroke="#38bdf8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrowCyan)"/>
+
+  <!-- vpsie → VPSie API (ext) -->
+  <line x1="340" y1="480" x2="430" y2="72" stroke="#64748b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- controller → CAPI (ext) -->
+  <line x1="350" y1="210" x2="150" y2="72" stroke="#64748b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+  <!-- controller → CAPV (ext) -->
+  <line x1="390" y1="210" x2="300" y2="72" stroke="#64748b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- metrics → Prometheus (ext) -->
+  <line x1="620" y1="210" x2="590" y2="72" stroke="#64748b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- Legend for new components -->
+  <g transform="translate(60,620)">
+    <rect x="0" y="0" width="340" height="100" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="1" opacity=".8"/>
+    <text x="15" y="22" fill="#38bdf8" font-size="12" font-weight="700">New: Utilization-Aware Scaling</text>
+    <text x="15" y="42" fill="#94a3b8" font-size="10">workload — CAPI kubeconfig Secret, node/pod/metrics access</text>
+    <text x="15" y="58" fill="#94a3b8" font-size="10">utilization — requests + metrics-server aggregation</text>
+    <text x="15" y="74" fill="#94a3b8" font-size="10">scheduler — bin-pack simulation, taint/affinity/selector checks</text>
+    <text x="15" y="90" fill="#94a3b8" font-size="10">selector — ScalingDirection (Up/Down/Any) with directional filters</text>
+  </g>
+</svg>
+</div>
+
+<!-- ─── Utilization-Aware Scaling overview ─── -->
+<h2>Utilization-Aware Scaling</h2>
+<div class="info-box">
+  <h3>How It Works</h3>
+  <p>The controller connects to workload clusters via CAPI kubeconfig Secrets (<code>&lt;cluster&gt;-kubeconfig</code>) to observe real node utilization.
+  Both pod resource <strong>requests</strong> (scheduled utilization) and <strong>metrics-server</strong> data (actual utilization) are used.</p>
+  <ul>
+    <li><strong>Upscale (75% default):</strong> Triggers if <code>max(scheduled, actual)</code> exceeds threshold for <em>either</em> CPU <em>or</em> memory. Selects a bigger VM plan with savings threshold relaxed to 0.</li>
+    <li><strong>Downscale (5% default):</strong> Triggers only if <code>min(scheduled, actual)</code> is below threshold for <em>both</em> CPU <em>and</em> memory. Additionally, a scheduling simulation must confirm all pods fit on the smaller plan.</li>
+    <li><strong>In range:</strong> Falls back to the existing cost-optimization path (<code>DirectionAny</code>).</li>
+    <li><strong>Graceful degradation:</strong> If the kubeconfig Secret is missing or metrics-server is unavailable, the controller falls back to static constraints with no behavioral change.</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Scheduling Simulation</h3>
+  <p>Before allowing a downscale, the scheduler package simulates bin-packing all non-DaemonSet, non-mirror pods onto virtual nodes with the candidate plan's capacity. For each pod it checks:</p>
+  <ul>
+    <li><strong>Resource fit:</strong> <code>pod.requests.cpu &le; allocatable_cpu</code> and <code>pod.requests.memory &le; allocatable_ram</code></li>
+    <li><strong>Tolerations:</strong> Pod must tolerate all NoSchedule/NoExecute taints on the node</li>
+    <li><strong>NodeSelector:</strong> All <code>pod.spec.nodeSelector</code> keys must match node labels</li>
+    <li><strong>NodeAffinity:</strong> Required <code>matchExpressions</code> (In, NotIn, Exists, DoesNotExist, Gt, Lt) are evaluated</li>
+  </ul>
+  <p>If any pod cannot be placed, downscale is blocked and the blocking pods are reported in the <code>SchedulingSimulation</code> condition.</p>
+</div>
+
+<!-- ─── Component cards ─── -->
+<h2>Components</h2>
+<div class="grid">
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">ScalingPolicy CRD</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">api/v1alpha1/</div>
+    <div class="card-desc">Custom resource defining cost optimization rules per MachineDeployment. Includes spec for target, credentials, constraints, aggressiveness, utilization thresholds, rebalancing, and dry-run mode.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">scalingpolicy_types.go</span> <span class="file-note">— UtilizationSpec (ScaleUp/DownThreshold), UtilizationStatus</span></li>
+      <li class="done"><span class="file-name">conditions_consts.go</span> <span class="file-note">— 6 conditions, 20 reasons (incl. utilization &amp; scheduling)</span></li>
+      <li class="done"><span class="file-name">groupversion_info.go</span> <span class="file-note">— scheme registration</span></li>
+      <li class="done"><span class="file-name">zz_generated.deepcopy.go</span> <span class="file-note">— auto-generated (incl. UtilizationStatus)</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">VPSie Pricing Client</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/vpsie/</div>
+    <div class="card-desc">HTTP client for VPSie pricing API. Fetches plan categories and plans per datacenter/OS/category. Auth via <code>Vpsie-Auth</code> header.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">interface.go</span> <span class="file-note">— PricingClient interface (DI)</span></li>
+      <li class="done"><span class="file-name">client.go</span> <span class="file-note">— GET categories, POST resources</span></li>
+      <li class="done"><span class="file-name">types.go</span> <span class="file-note">— Plan, PlanCategory structs</span></li>
+      <li class="done"><span class="file-name">client_test.go</span> <span class="file-note">— 4 tests (httptest)</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Pricing Cache &amp; Scorer</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/pricing/</div>
+    <div class="card-desc">Thread-safe in-memory cache with configurable refresh interval. Scorer computes weighted plan scores (price, fit, headroom) by aggressiveness.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">cache.go</span> <span class="file-note">— RWMutex, category name&rarr;UUID</span></li>
+      <li class="done"><span class="file-name">scorer.go</span> <span class="file-note">— 3 weight profiles, kubelet reserved</span></li>
+      <li class="done"><span class="file-name">cache_test.go</span> <span class="file-note">— 5 tests</span></li>
+      <li class="done"><span class="file-name">scorer_test.go</span> <span class="file-note">— 6 tests</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Plan Selector</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/selector/</div>
+    <div class="card-desc">Selects best plan with directional awareness: filter by constraints &rarr; directional filter (Up/Down/Any) &rarr; fit check &rarr; score &rarr; savings threshold. Upscale relaxes savings to 0.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">selector.go</span> <span class="file-note">— ScalingDirection enum + Select() with direction param</span></li>
+      <li class="done"><span class="file-name">selector_test.go</span> <span class="file-note">— 11 tests (fit, exclude, threshold, direction up/down)</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Workload Client</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/workload/</div>
+    <div class="card-desc">Connects to workload clusters via CAPI kubeconfig Secrets. Lists nodes (via Machine status.nodeRef), pods (field selector by nodeName), and metrics-server data. Clients cached with 5-minute TTL.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">client.go</span> <span class="file-note">— WorkloadClient interface + CAPIClientFactory</span></li>
+      <li class="done"><span class="file-name">fake.go</span> <span class="file-note">— FakeWorkloadClient + FakeWorkloadClientFactory</span></li>
+      <li class="done"><span class="file-name">client_test.go</span> <span class="file-note">— 2 tests (fake client &amp; factory)</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Utilization Calculator</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/utilization/</div>
+    <div class="card-desc">Computes scheduled utilization (pod requests / allocatable) and actual utilization (metrics-server usage / allocatable). Evaluates thresholds asymmetrically: upscale uses max, downscale uses min.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">types.go</span> <span class="file-note">— Result, NodeUtilization (with Labels/Taints)</span></li>
+      <li class="done"><span class="file-name">calculator.go</span> <span class="file-note">— Calculate(), EvaluateThresholds(), Effective*Percent()</span></li>
+      <li class="done"><span class="file-name">calculator_test.go</span> <span class="file-note">— 10 tests (requests-only, metrics, all threshold combos)</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Scheduling Simulator</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/scheduler/</div>
+    <div class="card-desc">Validates downscale safety by bin-packing pods onto virtual nodes (first-fit-decreasing). Checks resource fit, taints/tolerations, nodeSelector, and nodeAffinity required rules. Excludes DaemonSet and mirror pods.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">simulator.go</span> <span class="file-note">— Simulator interface + DefaultSimulator</span></li>
+      <li class="done"><span class="file-name">simulator_test.go</span> <span class="file-note">— 16 tests (resources, DaemonSet, mirror, taints, tolerations, selectors, affinity, bin-pack)</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">ScalingPolicy Controller</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/controller/scalingpolicy_controller.go</div>
+    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Updates <code>CurrentUtilization</code> status.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">scalingpolicy_controller.go</span> <span class="file-note">— Reconcile + determineDirection + switchPlan</span></li>
+      <li class="done"><span class="file-name">scalingpolicy_controller_test.go</span> <span class="file-note">— 3 envtest tests</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Rebalancer</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/controller/rebalancer.go</div>
+    <div class="card-desc">Periodic background loop (<code>manager.Runnable</code>). Evaluates rebalancing-enabled policies with cooldown, rollout detection, min-replica guards, and utilization-aware direction.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">rebalancer.go</span> <span class="file-note">— Start(), runCycle(), rebalancePolicy() with direction</span></li>
+      <li class="done"><span class="file-name">rebalancer_test.go</span> <span class="file-note">— 3 unit tests</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Metrics</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/metrics/metrics.go</div>
+    <div class="card-desc">8 Prometheus metrics auto-registered with controller-runtime registry. Includes utilization and scheduling simulation metrics.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">metrics.go</span> <span class="file-note">— selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Test Infrastructure</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">internal/controller/</div>
+    <div class="card-desc">Envtest suite, fake pricing client, test object constructors for all CAPI/CAPV/scaler resources.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">suite_test.go</span> <span class="file-note">— envtest + CAPI/CAPV CRDs</span></li>
+      <li class="done"><span class="file-name">helpers_test.go</span> <span class="file-note">— fakes, constructors, refresh</span></li>
+    </ul>
+  </div>
+
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">Build &amp; Deploy</span>
+      <span class="badge done">Done</span>
+    </div>
+    <div class="card-path">Makefile, Dockerfile, config/</div>
+    <div class="card-desc">Makefile mirroring CAPV. Multi-stage distroless Dockerfile. Kustomize overlays for CRD, RBAC, manager deployment.</div>
+    <ul class="card-files">
+      <li class="done"><span class="file-name">Makefile</span> <span class="file-note">— build, test, manifests, docker-buildx</span></li>
+      <li class="done"><span class="file-name">Dockerfile</span> <span class="file-note">— multi-arch, distroless, nonroot</span></li>
+      <li class="done"><span class="file-name">config/crd/</span> <span class="file-note">— auto-generated CRD YAML</span></li>
+      <li class="done"><span class="file-name">config/rbac/</span> <span class="file-note">— auto-generated RBAC</span></li>
+      <li class="done"><span class="file-name">config/manager/</span> <span class="file-note">— deployment, resources, probes</span></li>
+      <li class="done"><span class="file-name">.github/workflows/ci.yaml</span> <span class="file-note">— build+lint+docker+cosign</span></li>
+    </ul>
+  </div>
+
+  <div class="card todo">
+    <div class="card-head">
+      <span class="card-title">Rollback on Stalled Rollout</span>
+      <span class="badge todo">Not started</span>
+    </div>
+    <div class="card-path">— planned —</div>
+    <div class="card-desc">Detect stalled MachineDeployment rolling update and revert to the previous VPSieMachineTemplate.</div>
+    <ul class="card-files">
+      <li class="todo"><span class="file-name">Stall detection</span> <span class="file-note">— timeout on UpToDate != Replicas</span></li>
+      <li class="todo"><span class="file-name">Template rollback</span> <span class="file-note">— revert infraRef to previous template</span></li>
+    </ul>
+  </div>
+
+</div>
+
+<!-- ─── Feature matrix ─── -->
+<h2>Feature Matrix</h2>
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Status</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>ScalingPolicy CRD</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Full spec/status with UtilizationSpec thresholds, print columns, short name <code>sp</code></td></tr>
+    <tr><td>Plan category fetching</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>GET /api/v2/plans/category, name&rarr;UUID resolution</td></tr>
+    <tr><td>Plan pricing fetching</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>POST /api/v2/resources per dc+os+category</td></tr>
+    <tr><td>In-memory pricing cache</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Thread-safe, configurable refresh (default 5m)</td></tr>
+    <tr><td>Plan scoring algorithm</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>3 aggressiveness levels, kubelet reserves deducted</td></tr>
+    <tr><td>Directional plan selection</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>ScalingDirection (Up/Down/Any), upscale relaxes savings threshold</td></tr>
+    <tr><td>Credential resolution</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Policy-level or fallback to VPSieCluster</td></tr>
+    <tr><td>VPSieMachineTemplate creation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>New template from recommended plan</td></tr>
+    <tr><td>MachineDeployment patch</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>infraRef swap triggers CAPI rolling update</td></tr>
+    <tr><td>Dry-run mode</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Log recommendations, set DryRun phase, no changes</td></tr>
+    <tr><td>Periodic rebalancing</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Background loop, cooldown per aggressiveness, utilization-aware</td></tr>
+    <tr><td>Rollout detection</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Skips rebalancing when UpToDate &ne; Replicas</td></tr>
+    <tr><td>Min-replica guard</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Requires &ge;2 replicas before rebalancing</td></tr>
+    <tr><td>Workload cluster access</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>CAPI kubeconfig Secret, cached clients (5m TTL)</td></tr>
+    <tr><td>Pod resource monitoring</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Aggregate pod requests per node via workload API</td></tr>
+    <tr><td>Metrics-server integration</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Actual CPU/memory usage, graceful if unavailable</td></tr>
+    <tr><td>Utilization threshold evaluation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Asymmetric: upscale on max(sched,actual), downscale on min(sched,actual)</td></tr>
+    <tr><td>Scheduling simulation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Bin-pack + taint/toleration/nodeSelector/nodeAffinity checks</td></tr>
+    <tr><td>Prometheus metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>8 metrics: selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations</td></tr>
+    <tr><td>RBAC (auto-generated)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>From kubebuilder markers on reconciler</td></tr>
+    <tr><td>Kustomize deployment</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>CRD + RBAC + manager overlays</td></tr>
+    <tr><td>CI pipeline</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Build, lint, multi-arch Docker, cosign</td></tr>
+    <tr><td>Unit tests</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>55 tests across vpsie, pricing, selector, workload, utilization, scheduler</td></tr>
+    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>6 tests: dry-run, plan switch, error handling</td></tr>
+    <tr><td>Leader election</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable via <code>--leader-elect</code></td></tr>
+    <tr><td>Health probes</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Liveness + readiness on :8083</td></tr>
+    <tr><td style="color:var(--text-dim)">Rollback on stalled rollout</td><td><span class="status-icon" style="color:var(--todo)">&#9679;</span></td><td>Detect stalled MachineDeployment, revert template</td></tr>
+  </tbody>
+</table>
+
+<!-- ─── Test summary ─── -->
+<h2>Test Coverage</h2>
+<div class="grid">
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/vpsie</span>
+      <span class="badge done">4 tests</span>
+    </div>
+    <div class="card-desc">HTTP client with httptest: categories, plans, auth error, empty key</div>
+  </div>
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/pricing</span>
+      <span class="badge done">11 tests</span>
+    </div>
+    <div class="card-desc">Cache: refresh, filter, resolve, find, staleness. Scorer: capacity, scoring, savings, weights</div>
+  </div>
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/selector</span>
+      <span class="badge done">11 tests</span>
+    </div>
+    <div class="card-desc">Cheapest fit, optimal plan, constraints, exclusions, no-fit, savings threshold, aggressiveness, direction up/down/any filtering, savings relaxation</div>
+  </div>
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/workload</span>
+      <span class="badge done">2 tests</span>
+    </div>
+    <div class="card-desc">Fake client &amp; factory verification (real client requires live cluster)</div>
+  </div>
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/utilization</span>
+      <span class="badge done">10 tests</span>
+    </div>
+    <div class="card-desc">Calculator: requests-only, with-metrics. Thresholds: high CPU, high memory, both low, one low, max for upscale, min for downscale, in-range, effective percent</div>
+  </div>
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/scheduler</span>
+      <span class="badge done">16 tests</span>
+    </div>
+    <div class="card-desc">All pods fit, insufficient resources, DaemonSet excluded, mirror excluded, taint blocking/tolerated, nodeSelector blocking/matching, nodeAffinity blocking/matching, bin-packing, zero nodes, no pods, toleration OpExists, affinity NotIn, affinity Exists</div>
+  </div>
+  <div class="card done">
+    <div class="card-head">
+      <span class="card-title">internal/controller</span>
+      <span class="badge done">6 tests</span>
+    </div>
+    <div class="card-desc">Envtest: dry-run reconcile, plan switch, target-not-found. Unit: cooldown, replicas, leader</div>
+  </div>
+</div>
+
+<!-- ─── Data flow ─── -->
+<h2>Data Flow: Reconcile Cycle</h2>
+<div style="background:var(--surface);border-radius:10px;padding:1.2rem;font-family:'SF Mono','Fira Code',monospace;font-size:.82rem;overflow-x:auto;line-height:1.8;color:var(--text-dim);">
+<pre style="margin:0;">
+<span style="color:#22c55e"> 1.</span> ScalingPolicy change / MachineDeployment change triggers reconcile
+<span style="color:#22c55e"> 2.</span> Resolve target MachineDeployment by <span style="color:var(--accent)">spec.targetRef</span>
+<span style="color:#22c55e"> 3.</span> Resolve API key: <span style="color:var(--accent)">policy.credentialsRef</span> &rarr; fallback <span style="color:var(--accent)">VPSieCluster.credentialsRef</span>
+<span style="color:#22c55e"> 4.</span> Ensure pricing cache is fresh &rarr; <span style="color:var(--accent)">GET /api/v2/plans/category</span>
+                                    &rarr; <span style="color:var(--accent)">POST /api/v2/resources</span> per category
+<span style="color:#22c55e"> 5.</span> Read current VPSieMachineTemplate &rarr; resolve <span style="color:var(--accent)">resourceIdentifier</span> to plan
+<span style="color:#38bdf8"> 6.</span> <strong>determineDirection()</strong>:
+    a. Read <span style="color:var(--accent)">&lt;cluster&gt;-kubeconfig</span> Secret from management cluster
+    b. List Nodes (via CAPI Machines <span style="color:var(--accent)">status.nodeRef</span>) &rarr; List Pods &rarr; Get NodeMetrics
+    c. Calculate scheduled utilization: <span style="color:var(--accent)">sum(pod.requests) / allocatable</span>
+    d. Calculate actual utilization: <span style="color:var(--accent)">metrics-server usage / allocatable</span> (if available)
+    e. Evaluate thresholds:
+       &bull; <span style="color:#ef4444">Upscale</span>: <span style="color:var(--accent)">max(sched, actual)</span> &gt; 75% for CPU <em>or</em> memory &rarr; <span style="color:var(--accent)">DirectionUp</span>
+       &bull; <span style="color:#22c55e">Downscale</span>: <span style="color:var(--accent)">min(sched, actual)</span> &lt; 5% for <em>both</em> &rarr; run scheduling simulation
+         &bull; Simulation safe &rarr; <span style="color:var(--accent)">DirectionDown</span>
+         &bull; Simulation blocked &rarr; <span style="color:var(--accent)">DirectionAny</span> (fallback)
+       &bull; In range &rarr; <span style="color:var(--accent)">DirectionAny</span>
+    f. Update <span style="color:var(--accent)">status.currentUtilization</span> + Prometheus metrics
+<span style="color:#22c55e"> 7.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
+<span style="color:#22c55e"> 8.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
+   <span style="color:#22c55e">If switch:</span> create new VPSieMachineTemplate &rarr; patch MD <span style="color:var(--accent)">infrastructureRef</span>
+              &rarr; <span style="color:var(--text-dim)">CAPI handles rolling update (cordon, drain, replace)</span>
+<span style="color:#22c55e"> 9.</span> Update status: currentPlan, recommendedPlan, savings, utilization, conditions, phase
+<span style="color:#22c55e">10.</span> Requeue after 60s
+</pre>
+</div>
+
+<!-- ─── Safety properties ─── -->
+<h2>Safety Properties</h2>
+<div class="info-box">
+  <ul>
+    <li><strong>No behavioral change when WorkloadClients is nil:</strong> Without workload access, falls back to <code>DirectionAny</code> with static <code>MinCPU/MinRAM</code> constraints (original behavior).</li>
+    <li><strong>Conservative downscaling:</strong> Requires BOTH CPU and memory below 5% using <code>min(scheduled, actual)</code>, AND scheduling simulation confirms all pods fit on the smaller plan.</li>
+    <li><strong>Eager upscaling:</strong> Triggers if EITHER CPU or memory exceeds 75% using <code>max(scheduled, actual)</code>. Savings threshold is relaxed to 0 (capacity &gt; cost).</li>
+    <li><strong>Graceful degradation:</strong> Kubeconfig secret missing? Metrics-server down? Calculator error? &rarr; All degrade gracefully to <code>DirectionAny</code> with conditions set for observability.</li>
+    <li><strong>DaemonSet &amp; mirror pod exclusion:</strong> Scheduling simulation ignores pods that auto-schedule everywhere, preventing false positives.</li>
+    <li><strong>Observability:</strong> 6 condition types, 20 reason codes, 8 Prometheus metrics provide full visibility into every decision.</li>
+  </ul>
+</div>
+
+<div style="margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);color:var(--text-dim);font-size:.8rem;text-align:center;">
+  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 60 tests passing, 38 source files
+</div>
+
+</body>
+</html>

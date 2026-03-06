@@ -1,0 +1,8 @@
+namespace: vpsie-scaler-system
+
+namePrefix: vpsie-scaler-
+
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager

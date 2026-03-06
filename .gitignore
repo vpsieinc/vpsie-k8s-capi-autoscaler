@@ -1,0 +1,19 @@
+# Binaries
+bin/
+manager
+
+# Build artifacts
+_out/
+cover.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Test
+testbin/
