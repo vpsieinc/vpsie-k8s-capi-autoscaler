@@ -27,7 +27,7 @@ func TestFetchCategories(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -54,25 +54,27 @@ func TestFetchCategories(t *testing.T) {
 
 func TestFetchPlans(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v2/resources" {
+		if r.URL.Path != "/apps/v2/resources" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
 		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
+			t.Fatalf("expected form-urlencoded content type, got %q", ct)
+		}
 
-		var payload map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("failed to decode request body: %v", err)
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form body: %v", err)
 		}
-		if payload["dcIdentifier"] != "dc-1" {
-			t.Fatalf("expected dcIdentifier=dc-1, got %q", payload["dcIdentifier"])
+		if r.PostForm.Get("dcIdentifier") != "dc-1" {
+			t.Fatalf("expected dcIdentifier=dc-1, got %q", r.PostForm.Get("dcIdentifier"))
 		}
-		if payload["osIdentifier"] != "os-1" {
-			t.Fatalf("expected osIdentifier=os-1, got %q", payload["osIdentifier"])
+		if r.PostForm.Get("osIdentifier") != "os-1" {
+			t.Fatalf("expected osIdentifier=os-1, got %q", r.PostForm.Get("osIdentifier"))
 		}
-		if payload["planCategoryNodeId"] != "cat-1" {
-			t.Fatalf("expected planCategoryNodeId=cat-1, got %q", payload["planCategoryNodeId"])
+		if r.PostForm.Get("planCatIdentifier") != "cat-1" {
+			t.Fatalf("expected planCatIdentifier=cat-1, got %q", r.PostForm.Get("planCatIdentifier"))
 		}
 
 		resp := plansResponse{
@@ -82,7 +84,7 @@ func TestFetchPlans(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -116,7 +118,7 @@ func TestFetchPlans(t *testing.T) {
 func TestFetchCategories_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("unauthorized"))
+		_, _ = w.Write([]byte("unauthorized"))
 	}))
 	defer server.Close()
 

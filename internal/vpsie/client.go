@@ -1,13 +1,14 @@
 package vpsie
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -75,26 +76,25 @@ func (c *Client) FetchCategories(ctx context.Context) ([]PlanCategory, error) {
 	return result.Data, nil
 }
 
-// FetchPlans calls POST /api/v2/resources to list VM plans for a given dc+os+category.
+// FetchPlans calls POST /apps/v2/resources to list VM plans for a given dc+os+category.
 func (c *Client) FetchPlans(ctx context.Context, dcID, osID, planCatID string) ([]Plan, error) {
-	url := c.baseURL + "/api/v2/resources"
+	url := c.baseURL + "/apps/v2/resources"
 
-	payload := map[string]string{
-		"dcIdentifier":       dcID,
-		"osIdentifier":       osID,
-		"planCategoryNodeId": planCatID,
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling plans request: %w", err)
+	form := neturl.Values{
+		"dcIdentifier":     {dcID},
+		"osIdentifier":     {osID},
+		"planCatIdentifier": {planCatID},
+		"name":             {"query"},
+		"description":      {"query"},
+		"isCustom":         {"0"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("creating plans request: %w", err)
 	}
 	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
