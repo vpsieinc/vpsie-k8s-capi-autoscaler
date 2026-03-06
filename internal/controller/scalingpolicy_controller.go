@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -15,9 +16,11 @@ import (
 	"k8s.io/klog/v2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	optv1 "github.com/vpsieinc/vpsie-cluster-scaler/api/v1alpha1"
@@ -62,7 +65,7 @@ func (r *ScalingPolicyReconciler) SetupWithManager(ctx context.Context, mgr ctrl
 	r.caches = make(map[types.UID]*pricing.Cache)
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&optv1.ScalingPolicy{}).
+		For(&optv1.ScalingPolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
 			&clusterv1.MachineDeployment{},
 			handler.EnqueueRequestsFromMapFunc(r.machineDeploymentToScalingPolicy),
@@ -517,7 +520,7 @@ func (r *ScalingPolicyReconciler) switchPlan(
 	// Create new VPSieMachineTemplate with the new plan
 	newTemplate := &infrav1.VPSieMachineTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-%s", md.Name, plan.Nickname),
+			Name:      fmt.Sprintf("%s-%s", md.Name, strings.ToLower(plan.Nickname)),
 			Namespace: md.Namespace,
 			Labels:    currentTemplate.Labels,
 		},

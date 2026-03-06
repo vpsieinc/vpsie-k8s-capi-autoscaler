@@ -179,6 +179,9 @@ type ScalingPolicySpec struct {
 	// AllowedCategories lists plan category names to consider.
 	// Empty means all categories are allowed.
 	// Controller resolves names to UUIDs via GET /api/v2/plans/category.
+	// NOTE: Category "A" (Shared CPU) uses memory ballooning which Talos does not
+	// support. VMs get the balloon minimum (~1-2 GiB) instead of the advertised RAM.
+	// Exclude "A" for Talos-based clusters: use ["C","M","G","N"] instead.
 	// +optional
 	AllowedCategories []string `json:"allowedCategories,omitempty"`
 
