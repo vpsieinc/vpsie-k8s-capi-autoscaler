@@ -240,6 +240,14 @@ func (r *ScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		minSavings = defaultMinSavingsPercent
 	}
 
+	// Track current replicas in status
+	currentReplicas := int32(1)
+	if md.Spec.Replicas != nil {
+		currentReplicas = *md.Spec.Replicas
+	}
+	policy.Status.CurrentReplicas = currentReplicas
+	policy.Status.DesiredReplicas = currentReplicas
+
 	// Determine scaling direction from workload utilization
 	clusterName := md.Labels["cluster.x-k8s.io/cluster-name"]
 	direction, utilResult, _ := r.determineDirection(ctx, &policy, &md, currentPlan, clusterName)
@@ -253,6 +261,11 @@ func (r *ScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Source:        utilization.EffectiveSource(utilResult),
 			LastUpdated:   now,
 		}
+	}
+
+	// --- Horizontal scaling: adjust replicas based on pending pods ---
+	if err := r.reconcileHorizontal(ctx, &policy, &md, clusterName, utilResult); err != nil {
+		klog.V(2).Infof("horizontal scaling error: %v", err)
 	}
 
 	// Use constraints for minimum requirements; override with actual pod requests if higher
@@ -688,4 +701,197 @@ func (r *ScalingPolicyReconciler) determineDirection(
 		Message: fmt.Sprintf("Utilization within thresholds (%d%%-%d%%)", downThresh, upThresh),
 	})
 	return selector.DirectionAny, result, nil
+}
+
+const defaultScaleDownStabilization = 5 * time.Minute
+
+// reconcileHorizontal checks for unschedulable pods and adjusts MachineDeployment replicas.
+func (r *ScalingPolicyReconciler) reconcileHorizontal(
+	ctx context.Context,
+	policy *optv1.ScalingPolicy,
+	md *clusterv1.MachineDeployment,
+	clusterName string,
+	utilResult *utilization.Result,
+) error {
+	if !policy.Spec.Horizontal.Enabled {
+		return nil
+	}
+
+	if r.WorkloadClients == nil {
+		return nil
+	}
+
+	wc, err := r.WorkloadClients.ClientForCluster(ctx, clusterName, md.Namespace)
+	if err != nil {
+		return fmt.Errorf("getting workload client: %w", err)
+	}
+
+	pendingPods, err := wc.ListPendingPods(ctx)
+	if err != nil {
+		return fmt.Errorf("listing pending pods: %w", err)
+	}
+
+	policy.Status.PendingPods = len(pendingPods)
+
+	currentReplicas := int32(1)
+	if md.Spec.Replicas != nil {
+		currentReplicas = *md.Spec.Replicas
+	}
+
+	minReplicas := policy.Spec.Horizontal.MinReplicas
+	if minReplicas <= 0 {
+		minReplicas = 1
+	}
+	maxReplicas := policy.Spec.Horizontal.MaxReplicas
+	if maxReplicas <= 0 {
+		maxReplicas = 10
+	}
+
+	// Scale up: pending pods exist
+	if len(pendingPods) > 0 {
+		if currentReplicas >= maxReplicas {
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  optv1.ReasonMaxReplicasReached,
+				Message: fmt.Sprintf("%d pending pods but already at max replicas (%d)", len(pendingPods), maxReplicas),
+			})
+			klog.V(2).Infof("horizontal: %d pending pods but at max replicas %d", len(pendingPods), maxReplicas)
+			return nil
+		}
+
+		// Add enough replicas for the pending pods (up to max)
+		desired := currentReplicas + int32(len(pendingPods))
+		if desired > maxReplicas {
+			desired = maxReplicas
+		}
+
+		policy.Status.DesiredReplicas = desired
+
+		if policy.Spec.DryRun {
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionTrue,
+				Reason:  optv1.ReasonDryRun,
+				Message: fmt.Sprintf("[DRY RUN] Would scale up %d→%d (%d pending pods)", currentReplicas, desired, len(pendingPods)),
+			})
+			klog.V(2).Infof("horizontal: [DRY RUN] would scale %s %d→%d for %d pending pods",
+				md.Name, currentReplicas, desired, len(pendingPods))
+			return nil
+		}
+
+		// Patch MachineDeployment replicas
+		patch := client.MergeFrom(md.DeepCopy())
+		md.Spec.Replicas = &desired
+		if err := r.Patch(ctx, md, patch); err != nil {
+			return fmt.Errorf("patching replicas: %w", err)
+		}
+
+		now := metav1.Now()
+		policy.Status.LastScaleTime = &now
+		policy.Status.CurrentReplicas = desired
+
+		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+			Type:    optv1.HorizontalScalingCondition,
+			Status:  metav1.ConditionTrue,
+			Reason:  optv1.ReasonScaleUpReplicas,
+			Message: fmt.Sprintf("Scaled up %d→%d (%d pending pods)", currentReplicas, desired, len(pendingPods)),
+		})
+
+		r.Recorder.Eventf(policy, corev1.EventTypeNormal, "HorizontalScaleUp",
+			"Scaled MachineDeployment %s from %d to %d replicas (%d pending pods)",
+			md.Name, currentReplicas, desired, len(pendingPods))
+
+		klog.V(2).Infof("horizontal: scaled %s %d→%d for %d pending pods",
+			md.Name, currentReplicas, desired, len(pendingPods))
+		return nil
+	}
+
+	// Scale down: no pending pods, check if nodes are underutilized
+	if utilResult == nil || currentReplicas <= minReplicas {
+		if currentReplicas <= minReplicas {
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionTrue,
+				Reason:  optv1.ReasonNoPendingPods,
+				Message: fmt.Sprintf("No pending pods, at min replicas (%d)", minReplicas),
+			})
+		}
+		return nil
+	}
+
+	// Check stabilization window
+	stabilization := defaultScaleDownStabilization
+	if policy.Spec.Horizontal.ScaleDownStabilization != nil {
+		stabilization = policy.Spec.Horizontal.ScaleDownStabilization.Duration
+	}
+	if policy.Status.LastScaleTime != nil && time.Since(policy.Status.LastScaleTime.Time) < stabilization {
+		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+			Type:    optv1.HorizontalScalingCondition,
+			Status:  metav1.ConditionTrue,
+			Reason:  optv1.ReasonStabilizationActive,
+			Message: fmt.Sprintf("Within stabilization window (last scale: %s ago)", time.Since(policy.Status.LastScaleTime.Time).Round(time.Second)),
+		})
+		return nil
+	}
+
+	// Check if all nodes are below the scale-down threshold
+	downThresh := policy.Spec.TargetUtilization.ScaleDownThreshold
+	if downThresh == 0 {
+		downThresh = 5
+	}
+
+	cpuPct := utilization.EffectiveCPUPercent(utilResult)
+	memPct := utilization.EffectiveMemoryPercent(utilResult)
+
+	if cpuPct < downThresh && memPct < downThresh && currentReplicas > minReplicas {
+		desired := currentReplicas - 1
+		if desired < minReplicas {
+			desired = minReplicas
+		}
+		policy.Status.DesiredReplicas = desired
+
+		if policy.Spec.DryRun {
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionTrue,
+				Reason:  optv1.ReasonDryRun,
+				Message: fmt.Sprintf("[DRY RUN] Would scale down %d→%d (CPU: %d%%, Mem: %d%%)", currentReplicas, desired, cpuPct, memPct),
+			})
+			return nil
+		}
+
+		patch := client.MergeFrom(md.DeepCopy())
+		md.Spec.Replicas = &desired
+		if err := r.Patch(ctx, md, patch); err != nil {
+			return fmt.Errorf("patching replicas for scale-down: %w", err)
+		}
+
+		now := metav1.Now()
+		policy.Status.LastScaleTime = &now
+		policy.Status.CurrentReplicas = desired
+
+		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+			Type:    optv1.HorizontalScalingCondition,
+			Status:  metav1.ConditionTrue,
+			Reason:  optv1.ReasonScaleDownReplicas,
+			Message: fmt.Sprintf("Scaled down %d→%d (CPU: %d%%, Mem: %d%%)", currentReplicas, desired, cpuPct, memPct),
+		})
+
+		r.Recorder.Eventf(policy, corev1.EventTypeNormal, "HorizontalScaleDown",
+			"Scaled MachineDeployment %s from %d to %d replicas (low utilization)",
+			md.Name, currentReplicas, desired)
+
+		klog.V(2).Infof("horizontal: scaled down %s %d→%d (CPU: %d%%, Mem: %d%%)",
+			md.Name, currentReplicas, desired, cpuPct, memPct)
+		return nil
+	}
+
+	meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+		Type:    optv1.HorizontalScalingCondition,
+		Status:  metav1.ConditionTrue,
+		Reason:  optv1.ReasonNoPendingPods,
+		Message: "No pending pods, utilization within range",
+	})
+	return nil
 }

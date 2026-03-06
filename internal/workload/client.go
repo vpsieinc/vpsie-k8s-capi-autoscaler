@@ -29,6 +29,9 @@ type WorkloadClient interface {
 	// GetNodeMetrics returns metrics-server data for the given nodes.
 	// Returns nil, nil if metrics-server is unavailable.
 	GetNodeMetrics(ctx context.Context, nodeNames []string) ([]metricsv1beta1.NodeMetrics, error)
+
+	// ListPendingPods returns pods in Pending state that are unschedulable.
+	ListPendingPods(ctx context.Context) ([]corev1.Pod, error)
 }
 
 // WorkloadClientFactory creates WorkloadClients for workload clusters.
@@ -190,6 +193,27 @@ func (c *capiWorkloadClient) ListPods(ctx context.Context, nodeNames []string) (
 		}
 	}
 	return allPods, nil
+}
+
+// ListPendingPods returns pods in Pending state that have an Unschedulable condition.
+func (c *capiWorkloadClient) ListPendingPods(ctx context.Context) ([]corev1.Pod, error) {
+	podList, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "status.phase=Pending",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing pending pods: %w", err)
+	}
+
+	var unschedulable []corev1.Pod
+	for _, pod := range podList.Items {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable {
+				unschedulable = append(unschedulable, pod)
+				break
+			}
+		}
+	}
+	return unschedulable, nil
 }
 
 // GetNodeMetrics returns metrics-server data for the given nodes.

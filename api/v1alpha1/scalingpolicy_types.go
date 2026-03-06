@@ -158,6 +158,33 @@ const (
 	ScalingPolicyPhaseError       ScalingPolicyPhase = "Error"
 )
 
+// HorizontalSpec configures horizontal scaling (adjusting MachineDeployment replicas).
+type HorizontalSpec struct {
+	// Enabled controls whether horizontal scaling is active.
+	// When enabled, the scaler adds nodes when pods are unschedulable
+	// and removes nodes when utilization is low across all nodes.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MinReplicas is the minimum number of replicas. The scaler will not scale below this.
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	MinReplicas int32 `json:"minReplicas,omitempty"`
+
+	// MaxReplicas is the maximum number of replicas. The scaler will not scale above this.
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+
+	// ScaleDownStabilization is the minimum time to wait after the last scale-up
+	// before allowing a scale-down. Prevents flapping.
+	// +optional
+	ScaleDownStabilization *metav1.Duration `json:"scaleDownStabilization,omitempty"`
+}
+
 // ScalingPolicySpec defines the desired state of ScalingPolicy.
 type ScalingPolicySpec struct {
 	// TargetRef references the MachineDeployment to optimize.
@@ -202,6 +229,10 @@ type ScalingPolicySpec struct {
 	// +optional
 	TargetUtilization UtilizationSpec `json:"targetUtilization,omitempty"`
 
+	// Horizontal configures horizontal scaling (replica count adjustments).
+	// +optional
+	Horizontal HorizontalSpec `json:"horizontal,omitempty"`
+
 	// DryRun enables log-only mode without making changes.
 	// +optional
 	// +kubebuilder:default=false
@@ -242,6 +273,22 @@ type ScalingPolicyStatus struct {
 	// +optional
 	EstimatedMonthlySavings string `json:"estimatedMonthlySavings,omitempty"`
 
+	// PendingPods is the number of unschedulable pods detected in the workload cluster.
+	// +optional
+	PendingPods int `json:"pendingPods,omitempty"`
+
+	// CurrentReplicas is the current replica count of the MachineDeployment.
+	// +optional
+	CurrentReplicas int32 `json:"currentReplicas,omitempty"`
+
+	// DesiredReplicas is the desired replica count after horizontal scaling.
+	// +optional
+	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
+
+	// LastScaleTime is the timestamp of the last horizontal scaling operation.
+	// +optional
+	LastScaleTime *metav1.Time `json:"lastScaleTime,omitempty"`
+
 	// Phase is the current phase of the ScalingPolicy.
 	// +optional
 	Phase ScalingPolicyPhase `json:"phase,omitempty"`
@@ -258,6 +305,8 @@ type ScalingPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase"
 // +kubebuilder:printcolumn:name="Current Plan",type="string",JSONPath=".status.currentPlan.nickname",description="Current VM plan"
 // +kubebuilder:printcolumn:name="Recommended",type="string",JSONPath=".status.recommendedPlan.nickname",description="Recommended VM plan"
+// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".status.currentReplicas",description="Current replicas"
+// +kubebuilder:printcolumn:name="Pending",type="integer",JSONPath=".status.pendingPods",description="Pending pods"
 // +kubebuilder:printcolumn:name="Savings",type="string",JSONPath=".status.estimatedMonthlySavings",description="Estimated monthly savings"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 

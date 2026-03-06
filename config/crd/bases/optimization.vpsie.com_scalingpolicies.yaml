@@ -33,6 +33,14 @@ spec:
       jsonPath: .status.recommendedPlan.nickname
       name: Recommended
       type: string
+    - description: Current replicas
+      jsonPath: .status.currentReplicas
+      name: Replicas
+      type: integer
+    - description: Pending pods
+      jsonPath: .status.pendingPods
+      name: Pending
+      type: integer
     - description: Estimated monthly savings
       jsonPath: .status.estimatedMonthlySavings
       name: Savings
@@ -80,6 +88,9 @@ spec:
                   AllowedCategories lists plan category names to consider.
                   Empty means all categories are allowed.
                   Controller resolves names to UUIDs via GET /api/v2/plans/category.
+                  NOTE: Category "A" (Shared CPU) uses memory ballooning which Talos does not
+                  support. VMs get the balloon minimum (~1-2 GiB) instead of the advertised RAM.
+                  Exclude "A" for Talos-based clusters: use ["C","M","G","N"] instead.
                 items:
                   type: string
                 type: array
@@ -137,6 +148,37 @@ spec:
                 default: false
                 description: DryRun enables log-only mode without making changes.
                 type: boolean
+              horizontal:
+                description: Horizontal configures horizontal scaling (replica count
+                  adjustments).
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled controls whether horizontal scaling is active.
+                      When enabled, the scaler adds nodes when pods are unschedulable
+                      and removes nodes when utilization is low across all nodes.
+                    type: boolean
+                  maxReplicas:
+                    default: 10
+                    description: MaxReplicas is the maximum number of replicas. The
+                      scaler will not scale above this.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    default: 1
+                    description: MinReplicas is the minimum number of replicas. The
+                      scaler will not scale below this.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  scaleDownStabilization:
+                    description: |-
+                      ScaleDownStabilization is the minimum time to wait after the last scale-up
+                      before allowing a scale-down. Prevents flapping.
+                    type: string
+                type: object
               osIdentifier:
                 description: OSIdentifier is the image identifier for plan lookups.
                 minLength: 1
@@ -302,6 +344,10 @@ spec:
                 - ram
                 - ssd
                 type: object
+              currentReplicas:
+                description: CurrentReplicas is the current replica count of the MachineDeployment.
+                format: int32
+                type: integer
               currentUtilization:
                 description: CurrentUtilization reports the observed utilization of
                   the workload cluster.
@@ -328,6 +374,11 @@ spec:
                 - memoryPercent
                 - source
                 type: object
+              desiredReplicas:
+                description: DesiredReplicas is the desired replica count after horizontal
+                  scaling.
+                format: int32
+                type: integer
               estimatedMonthlySavings:
                 description: EstimatedMonthlySavings is the estimated monthly cost
                   savings.
@@ -342,6 +393,15 @@ spec:
                   operation.
                 format: date-time
                 type: string
+              lastScaleTime:
+                description: LastScaleTime is the timestamp of the last horizontal
+                  scaling operation.
+                format: date-time
+                type: string
+              pendingPods:
+                description: PendingPods is the number of unschedulable pods detected
+                  in the workload cluster.
+                type: integer
               phase:
                 description: Phase is the current phase of the ScalingPolicy.
                 type: string
