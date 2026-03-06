@@ -80,6 +80,23 @@ func findCAPICRDPath() string {
 }
 
 func findCAPVCRDPath() string {
-	// CAPV is replace-linked to a local directory; get its CRD path.
-	return filepath.Join("..", "..", "..", "cluster-api-provider-vpsie-2", "config", "crd", "bases")
+	// First try the replace-linked local directory (for development).
+	localPath := filepath.Join("..", "..", "..", "cluster-api-provider-vpsie-2", "config", "crd", "bases")
+	if _, err := os.Stat(localPath); err == nil {
+		return localPath
+	}
+	// Fall back to the Go module cache (for CI).
+	// The replace directive maps to github.com/vpsieinc/cluster-api-provider-vpsie-2.
+	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		panic("failed to run go env GOMODCACHE: " + err.Error())
+	}
+	modCache := strings.TrimSpace(string(out))
+	// Find the actual version directory in the module cache.
+	pattern := filepath.Join(modCache, "github.com", "vpsieinc", "cluster-api-provider-vpsie-2@*", "config", "crd", "bases")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	panic("CAPV CRDs not found in module cache; run 'go mod download' first")
 }
