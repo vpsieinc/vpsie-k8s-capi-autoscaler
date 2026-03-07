@@ -28,8 +28,8 @@ const (
 	// satelliteLabel identifies a satellite MachineDeployment and stores its base MD name.
 	satelliteLabel = "optimization.vpsie.com/satellite-of"
 
-	defaultMaxPools        = 3
-	defaultScaleDownDelayNP = 10 * time.Minute
+	defaultMaxPools              = 3
+	defaultNodePoolScaleDownDelay = 10 * time.Minute
 )
 
 // satelliteMDName returns the name for a satellite MachineDeployment.
@@ -384,7 +384,7 @@ func (r *ScalingPolicyReconciler) cleanupNodePools(
 	namespace string,
 	wc workload.WorkloadClient,
 ) error {
-	scaleDownDelay := defaultScaleDownDelayNP
+	scaleDownDelay := defaultNodePoolScaleDownDelay
 	if policy.Spec.NodePoolPolicy != nil && policy.Spec.NodePoolPolicy.ScaleDownDelay != nil {
 		scaleDownDelay = policy.Spec.NodePoolPolicy.ScaleDownDelay.Duration
 	}
@@ -414,6 +414,7 @@ func (r *ScalingPolicyReconciler) cleanupNodePools(
 		for _, node := range nodes {
 			count, err := wc.GetNonSystemPodCount(ctx, node.Name)
 			if err != nil {
+				klog.V(2).Infof("nodepool: failed to count pods on node %s: %v", node.Name, err)
 				continue
 			}
 			totalWorkloadPods += count
@@ -427,7 +428,14 @@ func (r *ScalingPolicyReconciler) cleanupNodePools(
 		}
 
 		// No workload pods — check delay.
-		if pool.LastPodSeen != nil && time.Since(pool.LastPodSeen.Time) < scaleDownDelay {
+		if pool.LastPodSeen == nil {
+			// First time seeing zero pods — start the delay timer.
+			now := metav1.Now()
+			pool.LastPodSeen = &now
+			updatedPools = append(updatedPools, pool)
+			continue
+		}
+		if time.Since(pool.LastPodSeen.Time) < scaleDownDelay {
 			updatedPools = append(updatedPools, pool)
 			continue
 		}
