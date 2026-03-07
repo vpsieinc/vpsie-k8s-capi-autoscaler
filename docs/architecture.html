@@ -406,6 +406,81 @@
   <p>The scaler uses <code>md.Status.Deprecated.V1Beta1.ReadyReplicas</code> (int32) instead, which counts machines with <code>Ready=True</code> only.</p>
 </div>
 
+<!-- ─── Scaling Logic Flowchart ─── -->
+<h2>Scaling Decision Flowchart</h2>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({theme:'dark',themeVariables:{primaryColor:'#1e293b',primaryTextColor:'#e2e8f0',primaryBorderColor:'#475569',lineColor:'#64748b',secondaryColor:'#334155',tertiaryColor:'#0f172a'},flowchart:{htmlLabels:true,curve:'basis'}});</script>
+
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.5rem;margin-bottom:2rem;overflow-x:auto;">
+<div class="mermaid">
+flowchart TD
+    START([Reconcile Triggered]) --> FETCH[Fetch ScalingPolicy + MachineDeployment]
+    FETCH --> CREDS{Credentials OK?}
+    CREDS -->|No| ERR1[Set Error phase, requeue 30s]
+    CREDS -->|Yes| CACHE[Refresh Pricing Cache]
+    CACHE --> PLAN[Resolve Current Plan from Template]
+    PLAN --> UTIL[Calculate Utilization via Workload Client]
+
+    UTIL --> HORIZ{Horizontal Enabled?}
+    HORIZ -->|No| VERT_DIR
+    HORIZ -->|Yes| H_READY{readyReplicas == currentReplicas?}
+    H_READY -->|No| H_WAIT[Wait for rollout to complete]
+    H_READY -->|Yes| PENDING{Pending Pods?}
+
+    PENDING -->|Yes| H_MAX{At maxReplicas?}
+    H_MAX -->|Yes| H_BLOCKED[Log: at max replicas]
+    H_MAX -->|No| H_UP[Scale replicas +1]
+
+    PENDING -->|No| H_MIN{At minReplicas?}
+    H_MIN -->|Yes| H_OK[No action needed]
+    H_MIN -->|No| H_THRESH{CPU AND Memory below scaleDownThreshold?}
+    H_THRESH -->|No| H_OK
+    H_THRESH -->|Yes| H_STAB{Within stabilization window?}
+    H_STAB -->|Yes| H_COOL[Wait for cooldown]
+    H_STAB -->|No| H_SIM{Bin-pack simulation: pods fit on N-1 nodes?}
+    H_SIM -->|No| H_UNSAFE[Scale-down blocked: pods won't fit]
+    H_SIM -->|Yes| H_DOWN[Scale replicas -1]
+
+    H_UP --> VERT_DIR
+    H_DOWN --> VERT_DIR
+    H_WAIT --> VERT_DIR
+    H_OK --> VERT_DIR
+    H_BLOCKED --> VERT_DIR
+    H_UNSAFE --> VERT_DIR
+    H_COOL --> VERT_DIR
+
+    VERT_DIR{Utilization Direction?}
+    VERT_DIR -->|"CPU OR Mem > 75%"| DIR_UP[DirectionUp]
+    VERT_DIR -->|"CPU AND Mem < 5%"| V_SIM{Scheduling sim safe?}
+    V_SIM -->|Yes| DIR_DOWN[DirectionDown]
+    V_SIM -->|No| DIR_ANY1[DirectionAny]
+    VERT_DIR -->|In range| DIR_ANY2[DirectionAny]
+
+    DIR_UP --> SELECT[selector.Select with direction]
+    DIR_DOWN --> SELECT
+    DIR_ANY1 --> SELECT
+    DIR_ANY2 --> SELECT
+
+    SELECT --> SWITCH{Better plan found + savings > threshold?}
+    SWITCH -->|No| STATUS[Update status, requeue 60s]
+    SWITCH -->|Yes| DRY{Dry-run mode?}
+    DRY -->|Yes| DRY_LOG[Log recommendation, no changes]
+    DRY -->|No| APPLY[Create new VPSieMachineTemplate + Patch MD infraRef]
+    APPLY --> CAPI[CAPI rolling update: cordon, drain, replace]
+    DRY_LOG --> STATUS
+    CAPI --> STATUS
+
+    style START fill:#38bdf8,stroke:#38bdf8,color:#0f172a
+    style H_UP fill:#22c55e,stroke:#16a34a,color:#fff
+    style H_DOWN fill:#22c55e,stroke:#16a34a,color:#fff
+    style APPLY fill:#22c55e,stroke:#16a34a,color:#fff
+    style ERR1 fill:#ef4444,stroke:#dc2626,color:#fff
+    style H_UNSAFE fill:#f59e0b,stroke:#d97706,color:#000
+    style H_BLOCKED fill:#f59e0b,stroke:#d97706,color:#000
+    style DRY_LOG fill:#f59e0b,stroke:#d97706,color:#000
+</div>
+</div>
+
 <!-- ─── Component cards ─── -->
 <h2>Components</h2>
 <div class="grid">
