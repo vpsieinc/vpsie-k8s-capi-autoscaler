@@ -69,6 +69,15 @@ var (
 		},
 		[]string{"cluster", "machinedeployment", "result"},
 	)
+
+	// DrainOperationsTotal counts drain operations by result.
+	DrainOperationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "vpsie_scaler_drain_operations_total",
+			Help: "Total number of node drain operations by result",
+		},
+		[]string{"cluster", "machinedeployment", "result"},
+	)
 )
 
 func init() {
@@ -81,5 +90,6 @@ func init() {
 		NodeCPUUtilizationPercent,
 		NodeMemoryUtilizationPercent,
 		SchedulingSimulationsTotal,
+		DrainOperationsTotal,
 	)
 }

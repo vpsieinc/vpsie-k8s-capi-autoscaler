@@ -50,4 +50,8 @@ const (
 	ReasonMinReplicasReached    = "MinReplicasReached"
 	ReasonStabilizationActive   = "StabilizationActive"
 	ReasonNoPendingPods         = "NoPendingPods"
+	ReasonDrainInProgress       = "DrainInProgress"
+	ReasonDrainTimeout          = "DrainTimeout"
+	ReasonDrainAborted          = "DrainAborted"
+	ReasonRolloutStalled        = "RolloutStalled"
 )

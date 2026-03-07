@@ -18,11 +18,13 @@ type FakeWorkloadClient struct {
 	PendingErr         error
 	MetricsErr         error
 	CordonErr          error
+	UncordonErr        error
 	DrainEvicted       int
 	DrainErr           error
 	NonSystemPodCount  int
 	NonSystemPodErr    error
 	CordonedNodes      []string
+	UncordonedNodes    []string
 	DrainedNodes       []string
 }
 
@@ -45,6 +47,11 @@ func (f *FakeWorkloadClient) GetNodeMetrics(_ context.Context, _ []string) ([]me
 func (f *FakeWorkloadClient) CordonNode(_ context.Context, nodeName string) error {
 	f.CordonedNodes = append(f.CordonedNodes, nodeName)
 	return f.CordonErr
+}
+
+func (f *FakeWorkloadClient) UncordonNode(_ context.Context, nodeName string) error {
+	f.UncordonedNodes = append(f.UncordonedNodes, nodeName)
+	return f.UncordonErr
 }
 
 func (f *FakeWorkloadClient) DrainNode(_ context.Context, nodeName string) (int, error) {

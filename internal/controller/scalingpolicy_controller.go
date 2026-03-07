@@ -704,6 +704,8 @@ func (r *ScalingPolicyReconciler) determineDirection(
 }
 
 const defaultScaleDownStabilization = 5 * time.Minute
+const defaultDrainTimeout = 5 * time.Minute
+const defaultRolloutStallTimeout = 15 * time.Minute
 
 // reconcileHorizontal checks for unschedulable pods and adjusts MachineDeployment replicas.
 func (r *ScalingPolicyReconciler) reconcileHorizontal(
@@ -751,6 +753,27 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 	// If so, verify pods have been rescheduled before reducing replicas.
 	if policy.Status.DrainingNode != "" {
 		nodeName := policy.Status.DrainingNode
+
+		// Check drain timeout
+		if policy.Status.DrainingStartedAt != nil && time.Since(policy.Status.DrainingStartedAt.Time) > defaultDrainTimeout {
+			klog.V(2).Infof("horizontal: drain timeout on %s after %s", nodeName, time.Since(policy.Status.DrainingStartedAt.Time).Round(time.Second))
+			if err := wc.UncordonNode(ctx, nodeName); err != nil {
+				klog.V(2).Infof("horizontal: failed to uncordon %s after timeout: %v", nodeName, err)
+			}
+			policy.Status.DrainingNode = ""
+			policy.Status.DrainingStartedAt = nil
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  optv1.ReasonDrainTimeout,
+				Message: fmt.Sprintf("Drain timeout on node %s — uncordoned and aborted", nodeName),
+			})
+			r.Recorder.Eventf(policy, corev1.EventTypeWarning, "DrainTimeout",
+				"Drain timed out on node %s after %s — uncordoned", nodeName, defaultDrainTimeout)
+			scalermetrics.DrainOperationsTotal.WithLabelValues(clusterName, md.Name, "timeout").Inc()
+			return nil
+		}
+
 		remaining, err := wc.GetNonSystemPodCount(ctx, nodeName)
 		if err != nil {
 			klog.V(2).Infof("horizontal: error checking drain status for %s: %v", nodeName, err)
@@ -762,7 +785,7 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 				Type:    optv1.HorizontalScalingCondition,
 				Status:  metav1.ConditionTrue,
-				Reason:  optv1.ReasonScaleDownReplicas,
+				Reason:  optv1.ReasonDrainInProgress,
 				Message: fmt.Sprintf("Drain in progress on %s (%d pods remaining)", nodeName, remaining),
 			})
 			return nil // requeue will check again
@@ -775,13 +798,18 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		}
 		if len(postDrainPending) > 0 {
 			klog.V(2).Infof("horizontal: drain of %s complete but %d pods pending — aborting scale-down", nodeName, len(postDrainPending))
+			if err := wc.UncordonNode(ctx, nodeName); err != nil {
+				klog.V(2).Infof("horizontal: failed to uncordon %s after abort: %v", nodeName, err)
+			}
 			policy.Status.DrainingNode = ""
+			policy.Status.DrainingStartedAt = nil
 			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 				Type:    optv1.HorizontalScalingCondition,
 				Status:  metav1.ConditionFalse,
-				Reason:  optv1.ReasonScaleDownReplicas,
-				Message: fmt.Sprintf("Drain complete on %s but %d pods pending — scale-down aborted", nodeName, len(postDrainPending)),
+				Reason:  optv1.ReasonDrainAborted,
+				Message: fmt.Sprintf("Drain complete on %s but %d pods pending — uncordoned and aborted", nodeName, len(postDrainPending)),
 			})
+			scalermetrics.DrainOperationsTotal.WithLabelValues(clusterName, md.Name, "aborted").Inc()
 			return nil
 		}
 
@@ -801,6 +829,7 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		policy.Status.LastScaleTime = &now
 		policy.Status.CurrentReplicas = desired
 		policy.Status.DrainingNode = ""
+		policy.Status.DrainingStartedAt = nil
 
 		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 			Type:    optv1.HorizontalScalingCondition,
@@ -812,6 +841,7 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		r.Recorder.Eventf(policy, corev1.EventTypeNormal, "HorizontalScaleDown",
 			"Scaled MachineDeployment %s from %d to %d replicas after draining node %s",
 			md.Name, currentReplicas, desired, nodeName)
+		scalermetrics.DrainOperationsTotal.WithLabelValues(clusterName, md.Name, "completed").Inc()
 
 		klog.V(2).Infof("horizontal: scaled %s %d→%d after draining %s",
 			md.Name, currentReplicas, desired, nodeName)
@@ -831,13 +861,28 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		readyReplicas = *md.Status.ReadyReplicas
 	}
 	if currentReplicas > readyReplicas {
-		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
-			Type:    optv1.HorizontalScalingCondition,
-			Status:  metav1.ConditionTrue,
-			Reason:  optv1.ReasonRolloutInProgress,
-			Message: fmt.Sprintf("Waiting for nodes to be ready (%d/%d ready)", readyReplicas, currentReplicas),
-		})
-		klog.V(2).Infof("horizontal: waiting for nodes %d/%d ready", readyReplicas, currentReplicas)
+		// Check if the rollout has stalled (no progress for too long)
+		if policy.Status.LastScaleTime != nil && time.Since(policy.Status.LastScaleTime.Time) > defaultRolloutStallTimeout {
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  optv1.ReasonRolloutStalled,
+				Message: fmt.Sprintf("Rollout stalled: %d/%d ready for %s", readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second)),
+			})
+			r.Recorder.Eventf(policy, corev1.EventTypeWarning, "RolloutStalled",
+				"MachineDeployment %s rollout stalled: %d/%d ready for %s",
+				md.Name, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
+			klog.V(2).Infof("horizontal: rollout stalled for %s (%d/%d ready, last scale %s ago)",
+				md.Name, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
+		} else {
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionTrue,
+				Reason:  optv1.ReasonRolloutInProgress,
+				Message: fmt.Sprintf("Waiting for nodes to be ready (%d/%d ready)", readyReplicas, currentReplicas),
+			})
+			klog.V(2).Infof("horizontal: waiting for nodes %d/%d ready", readyReplicas, currentReplicas)
+		}
 		return nil
 	}
 
@@ -1006,6 +1051,9 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 
 		// Track the draining node so next reconcile can verify completion
 		policy.Status.DrainingNode = targetNode
+		now := metav1.Now()
+		policy.Status.DrainingStartedAt = &now
+		scalermetrics.DrainOperationsTotal.WithLabelValues(clusterName, md.Name, "started").Inc()
 
 		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 			Type:    optv1.HorizontalScalingCondition,

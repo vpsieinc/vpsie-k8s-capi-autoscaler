@@ -259,6 +259,10 @@ func (in *ScalingPolicyStatus) DeepCopyInto(out *ScalingPolicyStatus) {
 		in, out := &in.LastScaleTime, &out.LastScaleTime
 		*out = (*in).DeepCopy()
 	}
+	if in.DrainingStartedAt != nil {
+		in, out := &in.DrainingStartedAt, &out.DrainingStartedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

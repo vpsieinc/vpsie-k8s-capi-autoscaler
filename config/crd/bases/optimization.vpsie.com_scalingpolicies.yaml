@@ -379,6 +379,17 @@ spec:
                   scaling.
                 format: int32
                 type: integer
+              drainingNode:
+                description: |-
+                  DrainingNode is the name of the node currently being drained for scale-down.
+                  When set, the controller will verify the drain is complete before reducing replicas.
+                type: string
+              drainingStartedAt:
+                description: |-
+                  DrainingStartedAt is the timestamp when the current drain operation began.
+                  Used to enforce a drain timeout (default 5 minutes).
+                format: date-time
+                type: string
               estimatedMonthlySavings:
                 description: EstimatedMonthlySavings is the estimated monthly cost
                   savings.

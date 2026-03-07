@@ -41,6 +41,9 @@ type WorkloadClient interface {
 	// Returns the number of pods evicted.
 	DrainNode(ctx context.Context, nodeName string) (int, error)
 
+	// UncordonNode marks a node as schedulable again.
+	UncordonNode(ctx context.Context, nodeName string) error
+
 	// GetNonSystemPodCount returns the number of non-DaemonSet, non-mirror,
 	// non-terminal pods on a node. Used to verify drain completion.
 	GetNonSystemPodCount(ctx context.Context, nodeName string) (int, error)
@@ -243,6 +246,24 @@ func (c *capiWorkloadClient) CordonNode(ctx context.Context, nodeName string) er
 		return fmt.Errorf("cordoning node %s: %w", nodeName, err)
 	}
 	klog.V(2).Infof("cordoned node %s in cluster %s", nodeName, c.clusterName)
+	return nil
+}
+
+// UncordonNode marks a node as schedulable in the workload cluster.
+func (c *capiWorkloadClient) UncordonNode(ctx context.Context, nodeName string) error {
+	node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting node %s: %w", nodeName, err)
+	}
+	if !node.Spec.Unschedulable {
+		return nil // already schedulable
+	}
+	node.Spec.Unschedulable = false
+	_, err = c.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("uncordoning node %s: %w", nodeName, err)
+	}
+	klog.V(2).Infof("uncordoned node %s in cluster %s", nodeName, c.clusterName)
 	return nil
 }
 

@@ -294,6 +294,11 @@ type ScalingPolicyStatus struct {
 	// +optional
 	DrainingNode string `json:"drainingNode,omitempty"`
 
+	// DrainingStartedAt is the timestamp when the current drain operation began.
+	// Used to enforce a drain timeout (default 5 minutes).
+	// +optional
+	DrainingStartedAt *metav1.Time `json:"drainingStartedAt,omitempty"`
+
 	// Phase is the current phase of the ScalingPolicy.
 	// +optional
 	Phase ScalingPolicyPhase `json:"phase,omitempty"`
