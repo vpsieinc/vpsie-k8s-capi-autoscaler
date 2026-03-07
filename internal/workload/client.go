@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -29,6 +30,23 @@ type WorkloadClient interface {
 	// GetNodeMetrics returns metrics-server data for the given nodes.
 	// Returns nil, nil if metrics-server is unavailable.
 	GetNodeMetrics(ctx context.Context, nodeNames []string) ([]metricsv1beta1.NodeMetrics, error)
+
+	// ListPendingPods returns pods in Pending state that are unschedulable.
+	ListPendingPods(ctx context.Context) ([]corev1.Pod, error)
+
+	// CordonNode marks a node as unschedulable.
+	CordonNode(ctx context.Context, nodeName string) error
+
+	// DrainNode evicts all non-DaemonSet, non-mirror pods from a node.
+	// Returns the number of pods evicted.
+	DrainNode(ctx context.Context, nodeName string) (int, error)
+
+	// UncordonNode marks a node as schedulable again.
+	UncordonNode(ctx context.Context, nodeName string) error
+
+	// GetNonSystemPodCount returns the number of non-DaemonSet, non-mirror,
+	// non-terminal pods on a node. Used to verify drain completion.
+	GetNonSystemPodCount(ctx context.Context, nodeName string) (int, error)
 }
 
 // WorkloadClientFactory creates WorkloadClients for workload clusters.
@@ -190,6 +208,134 @@ func (c *capiWorkloadClient) ListPods(ctx context.Context, nodeNames []string) (
 		}
 	}
 	return allPods, nil
+}
+
+// ListPendingPods returns pods in Pending state that have an Unschedulable condition.
+func (c *capiWorkloadClient) ListPendingPods(ctx context.Context) ([]corev1.Pod, error) {
+	podList, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "status.phase=Pending",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing pending pods: %w", err)
+	}
+
+	var unschedulable []corev1.Pod
+	for _, pod := range podList.Items {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable {
+				unschedulable = append(unschedulable, pod)
+				break
+			}
+		}
+	}
+	return unschedulable, nil
+}
+
+// CordonNode marks a node as unschedulable in the workload cluster.
+func (c *capiWorkloadClient) CordonNode(ctx context.Context, nodeName string) error {
+	node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting node %s: %w", nodeName, err)
+	}
+	if node.Spec.Unschedulable {
+		return nil // already cordoned
+	}
+	node.Spec.Unschedulable = true
+	_, err = c.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("cordoning node %s: %w", nodeName, err)
+	}
+	klog.V(2).Infof("cordoned node %s in cluster %s", nodeName, c.clusterName)
+	return nil
+}
+
+// UncordonNode marks a node as schedulable in the workload cluster.
+func (c *capiWorkloadClient) UncordonNode(ctx context.Context, nodeName string) error {
+	node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting node %s: %w", nodeName, err)
+	}
+	if !node.Spec.Unschedulable {
+		return nil // already schedulable
+	}
+	node.Spec.Unschedulable = false
+	_, err = c.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("uncordoning node %s: %w", nodeName, err)
+	}
+	klog.V(2).Infof("uncordoned node %s in cluster %s", nodeName, c.clusterName)
+	return nil
+}
+
+// DrainNode evicts all non-DaemonSet, non-mirror, non-terminal pods from a node.
+func (c *capiWorkloadClient) DrainNode(ctx context.Context, nodeName string) (int, error) {
+	podList, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + nodeName,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing pods on node %s: %w", nodeName, err)
+	}
+
+	evicted := 0
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if isDaemonSetPod(&pod) || isMirrorPod(&pod) {
+			continue
+		}
+		eviction := &policyv1.Eviction{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pod.Name,
+				Namespace: pod.Namespace,
+			},
+		}
+		if err := c.clientset.CoreV1().Pods(pod.Namespace).EvictV1(ctx, eviction); err != nil {
+			klog.V(2).Infof("failed to evict pod %s/%s from node %s: %v", pod.Namespace, pod.Name, nodeName, err)
+			continue
+		}
+		evicted++
+	}
+	klog.V(2).Infof("evicted %d pods from node %s in cluster %s", evicted, nodeName, c.clusterName)
+	return evicted, nil
+}
+
+// GetNonSystemPodCount returns the number of non-DaemonSet, non-mirror,
+// non-terminal pods still on a node.
+func (c *capiWorkloadClient) GetNonSystemPodCount(ctx context.Context, nodeName string) (int, error) {
+	podList, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + nodeName,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing pods on node %s: %w", nodeName, err)
+	}
+	count := 0
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if isDaemonSetPod(&pod) || isMirrorPod(&pod) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+// isDaemonSetPod checks if a pod is owned by a DaemonSet.
+func isDaemonSetPod(pod *corev1.Pod) bool {
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind == "DaemonSet" {
+			return true
+		}
+	}
+	return false
+}
+
+// isMirrorPod checks if a pod is a static/mirror pod.
+func isMirrorPod(pod *corev1.Pod) bool {
+	_, ok := pod.Annotations["kubernetes.io/config.mirror"]
+	return ok
 }
 
 // GetNodeMetrics returns metrics-server data for the given nodes.

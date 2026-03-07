@@ -19,6 +19,9 @@ const (
 	// SchedulingSimulationCondition indicates the result of the scheduling simulation for downscaling.
 	SchedulingSimulationCondition = "SchedulingSimulation"
 
+	// HorizontalScalingCondition indicates the result of horizontal scaling evaluation.
+	HorizontalScalingCondition = "HorizontalScaling"
+
 	// Reasons
 	ReasonPricingFetchFailed    = "PricingFetchFailed"
 	ReasonPricingDataReady      = "PricingDataReady"
@@ -41,4 +44,14 @@ const (
 	ReasonScaleDownTriggered    = "ScaleDownTriggered"
 	ReasonScaleDownBlocked      = "ScaleDownBlocked"
 	ReasonUtilizationInRange    = "UtilizationInRange"
+	ReasonScaleUpReplicas       = "ScaleUpReplicas"
+	ReasonScaleDownReplicas     = "ScaleDownReplicas"
+	ReasonMaxReplicasReached    = "MaxReplicasReached"
+	ReasonMinReplicasReached    = "MinReplicasReached"
+	ReasonStabilizationActive   = "StabilizationActive"
+	ReasonNoPendingPods         = "NoPendingPods"
+	ReasonDrainInProgress       = "DrainInProgress"
+	ReasonDrainTimeout          = "DrainTimeout"
+	ReasonDrainAborted          = "DrainAborted"
+	ReasonRolloutStalled        = "RolloutStalled"
 )

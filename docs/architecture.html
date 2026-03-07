@@ -125,9 +125,9 @@
 
 <!-- ─── Overall progress ─── -->
 <div class="overall">
-  <span class="pct-label" style="color:var(--done)">97%</span>
+  <span class="pct-label" style="color:var(--done)">99%</span>
   <div class="progress-bar">
-    <div class="progress-fill done" style="width:97%">core + utilization complete</div>
+    <div class="progress-fill done" style="width:99%">core + utilization + horizontal scaling complete</div>
   </div>
 </div>
 
@@ -203,7 +203,7 @@
     <rect x="0" y="0" width="280" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
     <circle cx="16" cy="25" r="6" fill="#22c55e"/>
     <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/controller</text>
-    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + determineDirection()</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + Horizontal + Direction</text>
   </g>
 
   <!-- ── internal/metrics ── -->
@@ -375,6 +375,155 @@
   <p>If any pod cannot be placed, downscale is blocked and the blocking pods are reported in the <code>SchedulingSimulation</code> condition.</p>
 </div>
 
+<!-- ─── Horizontal Scaling overview ─── -->
+<h2>Horizontal Scaling</h2>
+<div class="info-box">
+  <h3>How It Works</h3>
+  <p>Horizontal scaling adjusts the <strong>replica count</strong> of a MachineDeployment (adding/removing worker nodes) based on workload demand, complementing vertical scaling (which changes VM plan size).</p>
+  <ul>
+    <li><strong>Scale up:</strong> When unschedulable (Pending) pods are detected in the workload cluster, the scaler increases replicas by 1. Subsequent reconciles add more if pods remain pending.</li>
+    <li><strong>Scale down (multi-phase):</strong> When <em>both</em> CPU and memory utilization are below <code>scaleDownThreshold</code> (default 25%), and a <strong>bin-packing simulation</strong> confirms all non-system pods fit on N-1 nodes, the scaler initiates a <strong>cordon → drain → verify → reduce</strong> sequence across reconcile cycles.</li>
+    <li><strong>Guards:</strong> Respects <code>minReplicas</code>/<code>maxReplicas</code> bounds. Skips scaling when a rollout is in progress (<code>readyReplicas &lt; currentReplicas</code>) or a drain is in progress (<code>status.drainingNode</code> set). Stabilization window prevents flapping.</li>
+    <li><strong>CAPI integration:</strong> Patching <code>MachineDeployment.spec.replicas</code> triggers CAPI's machine deletion controller. The scaler handles cordon+drain itself to verify pod rescheduling before reducing replicas.</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Horizontal Scale-Down Safety</h3>
+  <p>Before removing a node, the scheduler's bin-packing simulator verifies all workload pods fit on the remaining nodes:</p>
+  <ul>
+    <li><strong>Synthetic plan:</strong> Node allocatable resources are used to construct a virtual plan (no dependency on VPSie plans API)</li>
+    <li><strong>First-fit-decreasing:</strong> Pods sorted by resource requests (largest first), placed onto N-1 virtual nodes</li>
+    <li><strong>Constraint checks:</strong> Resource fit, taints/tolerations, nodeSelector, required nodeAffinity</li>
+    <li><strong>Excluded:</strong> DaemonSet pods and mirror pods (auto-schedule everywhere)</li>
+    <li><strong>If unsafe:</strong> Scale-down is blocked and the reason is logged + set in the <code>HorizontalScaling</code> condition</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Multi-Phase Node Drain</h3>
+  <p>Scale-down uses a multi-phase cordon → drain → verify → reduce flow across reconcile cycles to ensure zero pod disruption:</p>
+  <ol style="margin-top:.5rem;padding-left:1.5rem;">
+    <li><strong>Phase 1 (initial reconcile):</strong>
+      <ul>
+        <li>Select the <strong>least-utilized node</strong> (lowest combined CPU+memory request ratio)</li>
+        <li><strong>Cordon</strong> the node (mark unschedulable via <code>node.spec.unschedulable=true</code>)</li>
+        <li><strong>Drain</strong> the node (evict all non-DaemonSet, non-mirror pods via <code>policyv1.Eviction</code>)</li>
+        <li>Set <code>status.drainingNode</code> and <code>status.drainingStartedAt</code> to track the operation across reconciles</li>
+      </ul>
+    </li>
+    <li><strong>Phase 2 (subsequent reconcile):</strong>
+      <ul>
+        <li><strong>Timeout check:</strong> If <code>drainingStartedAt</code> &gt; 5 minutes ago → <strong>uncordon</strong> the node, clear drain state, emit <code>DrainTimeout</code> warning event</li>
+        <li>Check <code>GetNonSystemPodCount()</code> on the draining node</li>
+        <li>If pods remain → requeue (keep waiting for eviction to complete)</li>
+        <li>If 0 pods remain → verify no new <strong>pending pods</strong> appeared (safety check)</li>
+        <li>If pending pods exist → <strong>uncordon</strong> the node, <strong>abort</strong> scale-down, clear drain state</li>
+        <li>If all clear → <strong>reduce replicas</strong>, record event, clear drain state</li>
+      </ul>
+    </li>
+  </ol>
+  <p style="margin-top:.5rem;color:var(--text-dim);font-size:.85rem;">This ensures pods are fully rescheduled and running on other nodes before the MachineDeployment replica count is decremented. Nodes are always uncordoned on abort/timeout to prevent wasted capacity.</p>
+</div>
+
+<div class="info-box">
+  <h3>CAPI v1beta2 ReadyReplicas</h3>
+  <p><code>md.Status.ReadyReplicas</code> (*int32) in CAPI v1beta2 requires <strong>ALL</strong> machine conditions to be True (including infra conditions like <code>FirewallAttached</code>, <code>PublicIPAssigned</code>). Since CAPV doesn't always set these for workers, this stays at 0.</p>
+  <p>The scaler uses <code>md.Status.Deprecated.V1Beta1.ReadyReplicas</code> (int32) instead, which counts machines with <code>Ready=True</code> only.</p>
+</div>
+
+<!-- ─── Scaling Logic Flowchart ─── -->
+<h2>Scaling Decision Flowchart</h2>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({theme:'dark',themeVariables:{primaryColor:'#1e293b',primaryTextColor:'#e2e8f0',primaryBorderColor:'#475569',lineColor:'#64748b',secondaryColor:'#334155',tertiaryColor:'#0f172a'},flowchart:{htmlLabels:true,curve:'basis'}});</script>
+
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.5rem;margin-bottom:2rem;overflow-x:auto;">
+<div class="mermaid">
+flowchart TD
+    START([Reconcile Triggered]) --> FETCH[Fetch ScalingPolicy + MachineDeployment]
+    FETCH --> CREDS{Credentials OK?}
+    CREDS -->|No| ERR1[Set Error phase, requeue 30s]
+    CREDS -->|Yes| CACHE[Refresh Pricing Cache]
+    CACHE --> PLAN[Resolve Current Plan from Template]
+    PLAN --> UTIL[Calculate Utilization via Workload Client]
+
+    UTIL --> HORIZ{Horizontal Enabled?}
+    HORIZ -->|No| VERT_DIR
+    HORIZ -->|Yes| H_DRAIN{status.drainingNode set?}
+    H_DRAIN -->|Yes| H_CHECK{Pods remaining on node?}
+    H_CHECK -->|Yes| H_DRAINING[Requeue: drain in progress]
+    H_CHECK -->|No| H_PEND2{New pending pods?}
+    H_PEND2 -->|Yes| H_ABORT[Abort scale-down, clear drainingNode]
+    H_PEND2 -->|No| H_COMPLETE[Reduce replicas, clear drainingNode]
+
+    H_DRAIN -->|No| H_READY{readyReplicas == currentReplicas?}
+    H_READY -->|No| H_WAIT[Wait for rollout to complete]
+    H_READY -->|Yes| PENDING{Pending Pods?}
+
+    PENDING -->|Yes| H_MAX{At maxReplicas?}
+    H_MAX -->|Yes| H_BLOCKED[Log: at max replicas]
+    H_MAX -->|No| H_UP[Scale replicas +1]
+
+    PENDING -->|No| H_MIN{At minReplicas?}
+    H_MIN -->|Yes| H_OK[No action needed]
+    H_MIN -->|No| H_THRESH{CPU AND Memory below scaleDownThreshold?}
+    H_THRESH -->|No| H_OK
+    H_THRESH -->|Yes| H_STAB{Within stabilization window?}
+    H_STAB -->|Yes| H_COOL[Wait for cooldown]
+    H_STAB -->|No| H_SIM{Bin-pack simulation: pods fit on N-1 nodes?}
+    H_SIM -->|No| H_UNSAFE[Scale-down blocked: pods won't fit]
+    H_SIM -->|Yes| H_CORDON[Cordon least-utilized node]
+    H_CORDON --> H_EVICT[Drain: evict pods]
+    H_EVICT --> H_TRACK[Set status.drainingNode, requeue]
+
+    H_UP --> VERT_DIR
+    H_COMPLETE --> VERT_DIR
+    H_ABORT --> VERT_DIR
+    H_DRAINING --> VERT_DIR
+    H_TRACK --> VERT_DIR
+    H_WAIT --> VERT_DIR
+    H_OK --> VERT_DIR
+    H_BLOCKED --> VERT_DIR
+    H_UNSAFE --> VERT_DIR
+    H_COOL --> VERT_DIR
+
+    VERT_DIR{Utilization Direction?}
+    VERT_DIR -->|"CPU OR Mem > 75%"| DIR_UP[DirectionUp]
+    VERT_DIR -->|"CPU AND Mem < 5%"| V_SIM{Scheduling sim safe?}
+    V_SIM -->|Yes| DIR_DOWN[DirectionDown]
+    V_SIM -->|No| DIR_ANY1[DirectionAny]
+    VERT_DIR -->|In range| DIR_ANY2[DirectionAny]
+
+    DIR_UP --> SELECT[selector.Select with direction]
+    DIR_DOWN --> SELECT
+    DIR_ANY1 --> SELECT
+    DIR_ANY2 --> SELECT
+
+    SELECT --> SWITCH{Better plan found + savings > threshold?}
+    SWITCH -->|No| STATUS[Update status, requeue 60s]
+    SWITCH -->|Yes| DRY{Dry-run mode?}
+    DRY -->|Yes| DRY_LOG[Log recommendation, no changes]
+    DRY -->|No| APPLY[Create new VPSieMachineTemplate + Patch MD infraRef]
+    APPLY --> CAPI[CAPI rolling update: cordon, drain, replace]
+    DRY_LOG --> STATUS
+    CAPI --> STATUS
+
+    style START fill:#38bdf8,stroke:#38bdf8,color:#0f172a
+    style H_UP fill:#22c55e,stroke:#16a34a,color:#fff
+    style H_COMPLETE fill:#22c55e,stroke:#16a34a,color:#fff
+    style H_CORDON fill:#fb923c,stroke:#ea580c,color:#000
+    style H_EVICT fill:#fb923c,stroke:#ea580c,color:#000
+    style H_TRACK fill:#fb923c,stroke:#ea580c,color:#000
+    style H_DRAINING fill:#fbbf24,stroke:#d97706,color:#000
+    style H_ABORT fill:#ef4444,stroke:#dc2626,color:#fff
+    style APPLY fill:#22c55e,stroke:#16a34a,color:#fff
+    style ERR1 fill:#ef4444,stroke:#dc2626,color:#fff
+    style H_UNSAFE fill:#f59e0b,stroke:#d97706,color:#000
+    style H_BLOCKED fill:#f59e0b,stroke:#d97706,color:#000
+    style DRY_LOG fill:#f59e0b,stroke:#d97706,color:#000
+</div>
+</div>
+
 <!-- ─── Component cards ─── -->
 <h2>Components</h2>
 <div class="grid">
@@ -443,9 +592,9 @@
       <span class="badge done">Done</span>
     </div>
     <div class="card-path">internal/workload/</div>
-    <div class="card-desc">Connects to workload clusters via CAPI kubeconfig Secrets. Lists nodes (via Machine status.nodeRef), pods (field selector by nodeName), and metrics-server data. Clients cached with 5-minute TTL.</div>
+    <div class="card-desc">Connects to workload clusters via CAPI kubeconfig Secrets. Lists nodes (via Machine status.nodeRef), pods, and metrics-server data. Provides node lifecycle ops: CordonNode, DrainNode (policyv1.Eviction), GetNonSystemPodCount. Clients cached with 5-minute TTL.</div>
     <ul class="card-files">
-      <li class="done"><span class="file-name">client.go</span> <span class="file-note">— WorkloadClient interface + CAPIClientFactory</span></li>
+      <li class="done"><span class="file-name">client.go</span> <span class="file-note">— WorkloadClient interface (7 methods) + CAPIClientFactory</span></li>
       <li class="done"><span class="file-name">fake.go</span> <span class="file-note">— FakeWorkloadClient + FakeWorkloadClientFactory</span></li>
       <li class="done"><span class="file-name">client_test.go</span> <span class="file-note">— 2 tests (fake client &amp; factory)</span></li>
     </ul>
@@ -484,9 +633,9 @@
       <span class="badge done">Done</span>
     </div>
     <div class="card-path">internal/controller/scalingpolicy_controller.go</div>
-    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Updates <code>CurrentUtilization</code> status.</div>
+    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Horizontal scaling: adds nodes for pending pods, removes nodes when underutilized (with bin-packing safety). Updates <code>CurrentUtilization</code> status.</div>
     <ul class="card-files">
-      <li class="done"><span class="file-name">scalingpolicy_controller.go</span> <span class="file-note">— Reconcile + determineDirection + switchPlan</span></li>
+      <li class="done"><span class="file-name">scalingpolicy_controller.go</span> <span class="file-note">— Reconcile + determineDirection + switchPlan + reconcileHorizontal</span></li>
       <li class="done"><span class="file-name">scalingpolicy_controller_test.go</span> <span class="file-note">— 3 envtest tests</span></li>
     </ul>
   </div>
@@ -546,16 +695,16 @@
     </ul>
   </div>
 
-  <div class="card todo">
+  <div class="card partial">
     <div class="card-head">
-      <span class="card-title">Rollback on Stalled Rollout</span>
-      <span class="badge todo">Not started</span>
+      <span class="card-title">Stalled Rollout Detection</span>
+      <span class="badge partial">Alert only</span>
     </div>
-    <div class="card-path">— planned —</div>
-    <div class="card-desc">Detect stalled MachineDeployment rolling update and revert to the previous VPSieMachineTemplate.</div>
+    <div class="card-path">internal/controller/</div>
+    <div class="card-desc">Detects when readyReplicas &lt; currentReplicas for &gt;15 minutes. Emits warning event + sets <code>RolloutStalled</code> condition. Auto-revert not yet implemented (too risky for v1).</div>
     <ul class="card-files">
-      <li class="todo"><span class="file-name">Stall detection</span> <span class="file-note">— timeout on UpToDate != Replicas</span></li>
-      <li class="todo"><span class="file-name">Template rollback</span> <span class="file-note">— revert infraRef to previous template</span></li>
+      <li class="done"><span class="file-name">Stall detection</span> <span class="file-note">— 15min timeout on readyReplicas &lt; currentReplicas</span></li>
+      <li class="todo"><span class="file-name">Template rollback</span> <span class="file-note">— revert infraRef to previous template (future)</span></li>
     </ul>
   </div>
 
@@ -586,15 +735,23 @@
     <tr><td>Metrics-server integration</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Actual CPU/memory usage, graceful if unavailable</td></tr>
     <tr><td>Utilization threshold evaluation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Asymmetric: upscale on max(sched,actual), downscale on min(sched,actual)</td></tr>
     <tr><td>Scheduling simulation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Bin-pack + taint/toleration/nodeSelector/nodeAffinity checks</td></tr>
-    <tr><td>Prometheus metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>8 metrics: selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations</td></tr>
+    <tr><td>Prometheus metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>9 metrics: selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations, drain operations</td></tr>
     <tr><td>RBAC (auto-generated)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>From kubebuilder markers on reconciler</td></tr>
     <tr><td>Kustomize deployment</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>CRD + RBAC + manager overlays</td></tr>
     <tr><td>CI pipeline</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Build, lint, multi-arch Docker, cosign</td></tr>
     <tr><td>Unit tests</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>55 tests across vpsie, pricing, selector, workload, utilization, scheduler</td></tr>
-    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>6 tests: dry-run, plan switch, error handling</td></tr>
+    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>17 tests: vertical (dry-run, plan switch, error) + horizontal (scale-up/down, drain, timeout, stalled)</td></tr>
+    <tr><td>Horizontal scale-up</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Adds 1 replica when pending pods detected, up to <code>maxReplicas</code></td></tr>
+    <tr><td>Horizontal scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Multi-phase: bin-packing sim &rarr; cordon &rarr; drain &rarr; verify rescheduled &rarr; reduce replicas</td></tr>
+    <tr><td>Node drain before scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Evicts pods via <code>policyv1.Eviction</code>, verifies 0 non-system pods + no pending before reducing replicas. Tracks via <code>status.drainingNode</code></td></tr>
+    <tr><td>Drain timeout</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>5min timeout — auto-uncordons node and aborts if drain takes too long (PDB-blocked pods). Tracked via <code>status.drainingStartedAt</code></td></tr>
+    <tr><td>Uncordon on abort</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Uncordons drained node when scale-down is aborted (pending pods post-drain or timeout) to prevent wasted capacity</td></tr>
+    <tr><td>Stalled rollout detection</td><td><span class="status-icon" style="color:var(--partial)">&#9679;</span></td><td>Warning event when readyReplicas &lt; currentReplicas for &gt;15min. Alert-only, no auto-revert</td></tr>
+    <tr><td>Drain metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td><code>DrainOperationsTotal</code> counter: started, completed, aborted, timeout</td></tr>
+    <tr><td>Horizontal stabilization window</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable <code>scaleDownStabilization</code>, rollout-in-progress guard, drain-in-progress guard</td></tr>
     <tr><td>Leader election</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable via <code>--leader-elect</code></td></tr>
     <tr><td>Health probes</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Liveness + readiness on :8083</td></tr>
-    <tr><td style="color:var(--text-dim)">Rollback on stalled rollout</td><td><span class="status-icon" style="color:var(--todo)">&#9679;</span></td><td>Detect stalled MachineDeployment, revert template</td></tr>
+    <tr><td style="color:var(--text-dim)">Rollback on stalled rollout</td><td><span class="status-icon" style="color:var(--todo)">&#9679;</span></td><td>Auto-revert template when rollout stalls (future — detection is done, revert is not)</td></tr>
   </tbody>
 </table>
 
@@ -646,9 +803,9 @@
   <div class="card done">
     <div class="card-head">
       <span class="card-title">internal/controller</span>
-      <span class="badge done">6 tests</span>
+      <span class="badge done">17 tests</span>
     </div>
-    <div class="card-desc">Envtest: dry-run reconcile, plan switch, target-not-found. Unit: cooldown, replicas, leader</div>
+    <div class="card-desc">Envtest: dry-run, plan switch, target-not-found, scale-up (pending pods, max replicas, dry-run), scale-down (bin-pack, drain+verify, drain abort+uncordon, drain timeout, stabilization, rollout in-progress, rollout stalled). Unit: cooldown, replicas, leader, leastUtilizedNode</div>
   </div>
 </div>
 
@@ -674,12 +831,25 @@
          &bull; Simulation blocked &rarr; <span style="color:var(--accent)">DirectionAny</span> (fallback)
        &bull; In range &rarr; <span style="color:var(--accent)">DirectionAny</span>
     f. Update <span style="color:var(--accent)">status.currentUtilization</span> + Prometheus metrics
-<span style="color:#22c55e"> 7.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
-<span style="color:#22c55e"> 8.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
+<span style="color:#38bdf8"> 7.</span> <strong>reconcileHorizontal()</strong> (if <span style="color:var(--accent)">spec.horizontal.enabled</span>):
+    a. If <span style="color:var(--accent)">status.drainingNode</span> set &rarr; verify drain complete:
+       &bull; <span style="color:var(--accent)">drainingStartedAt</span> &gt; 5min? &rarr; <span style="color:#ef4444">timeout</span>: uncordon node, clear drain state
+       &bull; Pods remaining? &rarr; requeue (wait for eviction)
+       &bull; 0 pods + no pending &rarr; <span style="color:#22c55e">reduce replicas</span>, clear drainingNode
+       &bull; 0 pods + pending exist &rarr; <span style="color:#ef4444">abort</span>: uncordon node, clear drainingNode
+    b. List pending pods in workload cluster
+    c. Pending pods? &rarr; scale up by 1 (up to maxReplicas)
+    d. No pending + CPU &amp; memory &lt; scaleDownThreshold?
+       &rarr; Run bin-packing simulation on N-1 nodes
+       &rarr; <span style="color:#ef4444">Unsafe</span>: block, log blocking pods
+       &rarr; <span style="color:#22c55e">Safe</span>: cordon least-utilized node &rarr; drain (evict pods) &rarr; set <span style="color:var(--accent)">status.drainingNode</span>
+    e. Stabilization window + rollout-in-progress + drain-in-progress guards
+<span style="color:#22c55e"> 8.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
+<span style="color:#22c55e"> 9.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
    <span style="color:#22c55e">If switch:</span> create new VPSieMachineTemplate &rarr; patch MD <span style="color:var(--accent)">infrastructureRef</span>
               &rarr; <span style="color:var(--text-dim)">CAPI handles rolling update (cordon, drain, replace)</span>
-<span style="color:#22c55e"> 9.</span> Update status: currentPlan, recommendedPlan, savings, utilization, conditions, phase
-<span style="color:#22c55e">10.</span> Requeue after 60s
+<span style="color:#22c55e">10.</span> Update status: currentPlan, recommendedPlan, savings, utilization, conditions, phase
+<span style="color:#22c55e">11.</span> Requeue after 60s
 </pre>
 </div>
 
@@ -692,12 +862,18 @@
     <li><strong>Eager upscaling:</strong> Triggers if EITHER CPU or memory exceeds 75% using <code>max(scheduled, actual)</code>. Savings threshold is relaxed to 0 (capacity &gt; cost).</li>
     <li><strong>Graceful degradation:</strong> Kubeconfig secret missing? Metrics-server down? Calculator error? &rarr; All degrade gracefully to <code>DirectionAny</code> with conditions set for observability.</li>
     <li><strong>DaemonSet &amp; mirror pod exclusion:</strong> Scheduling simulation ignores pods that auto-schedule everywhere, preventing false positives.</li>
-    <li><strong>Observability:</strong> 6 condition types, 20 reason codes, 8 Prometheus metrics provide full visibility into every decision.</li>
+    <li><strong>Horizontal bin-packing:</strong> Before removing a node, bin-packing simulation verifies all pods fit on N-1 nodes. Scale-down blocked if pods would become unschedulable.</li>
+    <li><strong>Multi-phase drain:</strong> Scale-down cordons and drains the least-utilized node, then waits for all pods to be rescheduled before reducing replicas. If new pending pods appear post-drain, scale-down is aborted and node is uncordoned. Tracked via <code>status.drainingNode</code> + <code>status.drainingStartedAt</code> across reconcile cycles.</li>
+    <li><strong>Drain timeout:</strong> 5-minute timeout prevents stuck drains (e.g. PDB-blocked pods). On timeout, the node is automatically uncordoned and drain state is cleared. Emits a <code>DrainTimeout</code> warning event.</li>
+    <li><strong>Uncordon on abort:</strong> Whenever a drain is aborted (pending pods or timeout), the node is uncordoned to prevent wasted capacity from a cordoned-but-not-removed node.</li>
+    <li><strong>Scale 1 at a time:</strong> Both horizontal scale-up and scale-down change replicas by 1 per reconcile, preventing over-/under-provisioning oscillation.</li>
+    <li><strong>Rollout awareness:</strong> Horizontal scaling skips when <code>readyReplicas &lt; currentReplicas</code> (machines still provisioning) or drain is in progress (<code>status.drainingNode</code> set). Uses CAPI v1beta1 deprecated field for accurate ready counts. Stalled rollouts (&gt;15min) emit warning events.</li>
+    <li><strong>Observability:</strong> 7 condition types, 29 reason codes, 9 Prometheus metrics provide full visibility into every decision.</li>
   </ul>
 </div>
 
 <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);color:var(--text-dim);font-size:.8rem;text-align:center;">
-  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 60 tests passing, 38 source files
+  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 60+ tests passing, 38 source files — Last updated: 2026-03-07 (multi-phase drain)
 </div>
 
 </body>
