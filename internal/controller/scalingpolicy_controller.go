@@ -747,6 +747,29 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		maxReplicas = 10
 	}
 
+	// Don't scale if a previous scale operation is still in progress
+	// (new machines are still provisioning — avoids feedback loop)
+	//
+	// Use the deprecated v1beta1 readyReplicas field because the v1beta2
+	// field requires ALL conditions (including infra conditions like
+	// FirewallAttached) to be True, which CAPV doesn't always set for workers.
+	var readyReplicas int32
+	if md.Status.Deprecated != nil && md.Status.Deprecated.V1Beta1 != nil {
+		readyReplicas = md.Status.Deprecated.V1Beta1.ReadyReplicas
+	} else if md.Status.ReadyReplicas != nil {
+		readyReplicas = *md.Status.ReadyReplicas
+	}
+	if currentReplicas > readyReplicas {
+		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+			Type:    optv1.HorizontalScalingCondition,
+			Status:  metav1.ConditionTrue,
+			Reason:  optv1.ReasonRolloutInProgress,
+			Message: fmt.Sprintf("Waiting for nodes to be ready (%d/%d ready)", readyReplicas, currentReplicas),
+		})
+		klog.V(2).Infof("horizontal: waiting for nodes %d/%d ready", readyReplicas, currentReplicas)
+		return nil
+	}
+
 	// Scale up: pending pods exist
 	if len(pendingPods) > 0 {
 		if currentReplicas >= maxReplicas {
@@ -760,8 +783,9 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 			return nil
 		}
 
-		// Add enough replicas for the pending pods (up to max)
-		desired := currentReplicas + int32(len(pendingPods))
+		// Scale up by 1 at a time to avoid over-provisioning.
+		// The next reconcile will add another if pods are still pending.
+		desired := currentReplicas + 1
 		if desired > maxReplicas {
 			desired = maxReplicas
 		}
@@ -849,6 +873,39 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		if desired < minReplicas {
 			desired = minReplicas
 		}
+
+		// Simulate bin-packing: verify all non-system pods fit on N-1 nodes
+		// before actually scaling down. Construct a synthetic plan from the
+		// first node's allocatable resources.
+		if len(utilResult.Nodes) > 0 {
+			n := utilResult.Nodes[0]
+			syntheticPlan := vpsie.Plan{
+				CPU: int(n.AllocatableCPU / 1000),
+				RAM: int(n.AllocatableRAM / (1024 * 1024)),
+			}
+			// The simulator uses plan CPU/RAM to compute capacity, but we
+			// already have the exact allocatable. Bump CPU+1 and RAM to
+			// offset the kubelet-reserved subtraction inside the simulator.
+			syntheticPlan.CPU = int((n.AllocatableCPU + 100) / 1000)
+			syntheticPlan.RAM = int((n.AllocatableRAM + 256*1024*1024) / (1024 * 1024))
+
+			sim := scheduler.NewSimulator()
+			simResult := sim.SimulateDownscale(utilResult.Nodes, syntheticPlan, int(desired))
+			if !simResult.Safe {
+				meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+					Type:    optv1.HorizontalScalingCondition,
+					Status:  metav1.ConditionTrue,
+					Reason:  optv1.ReasonNoPendingPods,
+					Message: fmt.Sprintf("Scale-down blocked: pods don't fit on %d nodes (%s)", desired, simResult.Message),
+				})
+				klog.V(2).Infof("horizontal: scale-down %d→%d blocked by bin-packing: %s",
+					currentReplicas, desired, simResult.Message)
+				return nil
+			}
+			klog.V(2).Infof("horizontal: bin-packing safe for %d→%d: %s",
+				currentReplicas, desired, simResult.Message)
+		}
+
 		policy.Status.DesiredReplicas = desired
 
 		if policy.Spec.DryRun {
