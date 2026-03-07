@@ -12,6 +12,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 
+	infrav1 "github.com/vpsieinc/cluster-api-provider-vpsie/api/v1alpha1"
+
 	optv1 "github.com/vpsieinc/vpsie-cluster-scaler/api/v1alpha1"
 	"github.com/vpsieinc/vpsie-cluster-scaler/internal/pricing"
 	"github.com/vpsieinc/vpsie-cluster-scaler/internal/utilization"
@@ -811,5 +813,250 @@ func TestLeastUtilizedNode(t *testing.T) {
 	// Test empty nodes.
 	if got := r.leastUtilizedNode(&utilization.Result{}); got != "" {
 		t.Fatalf("expected empty string for empty nodes, got %s", got)
+	}
+}
+
+// TestHorizontal_RolloutStalledWithRevert verifies that when a vertical rollout
+// stalls and PreviousInfraTemplate is set, the controller reverts the MD's
+// infrastructureRef.Name to the previous template and clears PreviousInfraTemplate.
+func TestHorizontal_RolloutStalledWithRevert(t *testing.T) {
+	objs := newScalingPolicyTestObjects(t, false)
+
+	refreshObject(t, objs.Policy)
+	objs.Policy.Spec.Horizontal = optv1.HorizontalSpec{
+		Enabled:     true,
+		MinReplicas: 1,
+		MaxReplicas: 5,
+	}
+	if err := k8sClient.Update(ctx, objs.Policy); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+
+	// Create the "new" template that caused the stall.
+	newTmpl := &infrav1.VPSieMachineTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "workers-s-1vcpu-2gb",
+			Namespace: objs.Namespace,
+		},
+		Spec: infrav1.VPSieMachineTemplateSpec{
+			Template: infrav1.VPSieMachineTemplateResource{
+				Spec: infrav1.VPSieMachineSpec{
+					ResourceIdentifier: "plan-small",
+					DCIdentifier:       "dc-test-1",
+					ImageIdentifier:    "img-talos-123",
+				},
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, newTmpl); err != nil {
+		t.Fatalf("create new VPSieMachineTemplate: %v", err)
+	}
+
+	// Patch MD's infrastructureRef to the new template (simulating a plan switch happened).
+	refreshObject(t, objs.MD)
+	objs.MD.Spec.Template.Spec.InfrastructureRef.Name = "workers-s-1vcpu-2gb"
+	if err := k8sClient.Update(ctx, objs.MD); err != nil {
+		t.Fatalf("update MD infraRef: %v", err)
+	}
+
+	// Set PreviousInfraTemplate to the original template.
+	refreshObject(t, objs.Policy)
+	objs.Policy.Status.PreviousInfraTemplate = "workers-template"
+
+	// Set readyReplicas < replicas (rollout in progress).
+	refreshObject(t, objs.MD)
+	objs.MD.Status.Deprecated = &clusterv1.MachineDeploymentDeprecatedStatus{
+		V1Beta1: &clusterv1.MachineDeploymentV1Beta1DeprecatedStatus{
+			ReadyReplicas: 2,
+		},
+	}
+	if err := k8sClient.Status().Update(ctx, objs.MD); err != nil {
+		t.Fatalf("update MD status: %v", err)
+	}
+	refreshObject(t, objs.MD)
+
+	// Set LastScaleTime to 20 minutes ago (beyond 15min stall timeout).
+	refreshObject(t, objs.Policy)
+	twentyMinAgo := metav1.NewTime(time.Now().Add(-20 * time.Minute))
+	objs.Policy.Status.LastScaleTime = &twentyMinAgo
+	objs.Policy.Status.PreviousInfraTemplate = "workers-template"
+
+	fakeWC := &workload.FakeWorkloadClient{
+		PendingPods: []corev1.Pod{},
+	}
+
+	r := &ScalingPolicyReconciler{
+		Client:          k8sClient,
+		Scheme:          testScheme,
+		Recorder:        record.NewFakeRecorder(10),
+		WorkloadClients: &workload.FakeWorkloadClientFactory{Client: fakeWC},
+		caches:          make(map[types.UID]*pricing.Cache),
+	}
+
+	refreshObject(t, objs.MD)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	if err != nil {
+		t.Fatalf("reconcileHorizontal: %v", err)
+	}
+
+	// MD's infrastructureRef should be reverted to the original template.
+	refreshObject(t, objs.MD)
+	if objs.MD.Spec.Template.Spec.InfrastructureRef.Name != "workers-template" {
+		t.Fatalf("expected infrastructureRef.Name reverted to workers-template, got %s",
+			objs.MD.Spec.Template.Spec.InfrastructureRef.Name)
+	}
+
+	// PreviousInfraTemplate should be cleared.
+	if objs.Policy.Status.PreviousInfraTemplate != "" {
+		t.Fatalf("expected PreviousInfraTemplate to be cleared, got %s",
+			objs.Policy.Status.PreviousInfraTemplate)
+	}
+
+	// PlanSelectedCondition should exist with reason TemplateReverted.
+	cond := meta.FindStatusCondition(objs.Policy.Status.Conditions, optv1.PlanSelectedCondition)
+	if cond == nil {
+		t.Fatal("expected PlanSelected condition to be set")
+	}
+	if cond.Reason != optv1.ReasonTemplateReverted {
+		t.Fatalf("expected reason %s, got %s", optv1.ReasonTemplateReverted, cond.Reason)
+	}
+}
+
+// TestHorizontal_RolloutStalledWithoutPreviousTemplate verifies that when a
+// rollout stalls but NO PreviousInfraTemplate is set (horizontal stall),
+// only an alert is emitted and no revert occurs.
+func TestHorizontal_RolloutStalledWithoutPreviousTemplate(t *testing.T) {
+	objs := newScalingPolicyTestObjects(t, false)
+
+	refreshObject(t, objs.Policy)
+	objs.Policy.Spec.Horizontal = optv1.HorizontalSpec{
+		Enabled:     true,
+		MinReplicas: 1,
+		MaxReplicas: 5,
+	}
+	if err := k8sClient.Update(ctx, objs.Policy); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+
+	// Set readyReplicas < replicas to simulate rollout in progress.
+	refreshObject(t, objs.MD)
+	objs.MD.Status.Deprecated = &clusterv1.MachineDeploymentDeprecatedStatus{
+		V1Beta1: &clusterv1.MachineDeploymentV1Beta1DeprecatedStatus{
+			ReadyReplicas: 2,
+		},
+	}
+	if err := k8sClient.Status().Update(ctx, objs.MD); err != nil {
+		t.Fatalf("update MD status: %v", err)
+	}
+	refreshObject(t, objs.MD)
+
+	// Set LastScaleTime to 20 minutes ago (beyond 15min stall timeout).
+	// Do NOT set PreviousInfraTemplate.
+	refreshObject(t, objs.Policy)
+	twentyMinAgo := metav1.NewTime(time.Now().Add(-20 * time.Minute))
+	objs.Policy.Status.LastScaleTime = &twentyMinAgo
+
+	fakeWC := &workload.FakeWorkloadClient{
+		PendingPods: []corev1.Pod{
+			{ObjectMeta: metav1.ObjectMeta{Name: "pending-1", Namespace: "default"}},
+		},
+	}
+
+	r := &ScalingPolicyReconciler{
+		Client:          k8sClient,
+		Scheme:          testScheme,
+		Recorder:        record.NewFakeRecorder(10),
+		WorkloadClients: &workload.FakeWorkloadClientFactory{Client: fakeWC},
+		caches:          make(map[types.UID]*pricing.Cache),
+	}
+
+	refreshObject(t, objs.MD)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	if err != nil {
+		t.Fatalf("reconcileHorizontal: %v", err)
+	}
+
+	// MD's infrastructureRef should remain unchanged.
+	refreshObject(t, objs.MD)
+	if objs.MD.Spec.Template.Spec.InfrastructureRef.Name != "workers-template" {
+		t.Fatalf("expected infrastructureRef.Name unchanged as workers-template, got %s",
+			objs.MD.Spec.Template.Spec.InfrastructureRef.Name)
+	}
+
+	// HorizontalScalingCondition should exist with reason RolloutStalled.
+	cond := meta.FindStatusCondition(objs.Policy.Status.Conditions, optv1.HorizontalScalingCondition)
+	if cond == nil {
+		t.Fatal("expected HorizontalScaling condition to be set")
+	}
+	if cond.Reason != optv1.ReasonRolloutStalled {
+		t.Fatalf("expected reason %s, got %s", optv1.ReasonRolloutStalled, cond.Reason)
+	}
+
+	// PlanSelectedCondition with reason TemplateReverted should NOT exist.
+	planCond := meta.FindStatusCondition(objs.Policy.Status.Conditions, optv1.PlanSelectedCondition)
+	if planCond != nil && planCond.Reason == optv1.ReasonTemplateReverted {
+		t.Fatal("expected NO PlanSelected condition with reason TemplateReverted")
+	}
+}
+
+// TestHorizontal_ClearPreviousTemplateOnSuccess verifies that when a rollout
+// completes successfully, PreviousInfraTemplate is cleared.
+func TestHorizontal_ClearPreviousTemplateOnSuccess(t *testing.T) {
+	objs := newScalingPolicyTestObjects(t, false)
+
+	refreshObject(t, objs.Policy)
+	objs.Policy.Spec.Horizontal = optv1.HorizontalSpec{
+		Enabled:     true,
+		MinReplicas: 1,
+		MaxReplicas: 5,
+	}
+	if err := k8sClient.Update(ctx, objs.Policy); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+
+	// Set readyReplicas == replicas (rollout complete).
+	refreshObject(t, objs.MD)
+	objs.MD.Status.Deprecated = &clusterv1.MachineDeploymentDeprecatedStatus{
+		V1Beta1: &clusterv1.MachineDeploymentV1Beta1DeprecatedStatus{
+			ReadyReplicas: 3,
+		},
+	}
+	if err := k8sClient.Status().Update(ctx, objs.MD); err != nil {
+		t.Fatalf("update MD status: %v", err)
+	}
+	refreshObject(t, objs.MD)
+
+	// Set PreviousInfraTemplate to simulate a previous plan switch.
+	refreshObject(t, objs.Policy)
+	objs.Policy.Status.PreviousInfraTemplate = "workers-old-template"
+
+	// Set LastScaleTime to 2 minutes ago (recent, not stalled).
+	twoMinAgo := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	objs.Policy.Status.LastScaleTime = &twoMinAgo
+
+	fakeWC := &workload.FakeWorkloadClient{
+		PendingPods: []corev1.Pod{},
+		Nodes:       []corev1.Node{},
+		Pods:        []corev1.Pod{},
+	}
+
+	r := &ScalingPolicyReconciler{
+		Client:          k8sClient,
+		Scheme:          testScheme,
+		Recorder:        record.NewFakeRecorder(10),
+		WorkloadClients: &workload.FakeWorkloadClientFactory{Client: fakeWC},
+		caches:          make(map[types.UID]*pricing.Cache),
+	}
+
+	refreshObject(t, objs.MD)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	if err != nil {
+		t.Fatalf("reconcileHorizontal: %v", err)
+	}
+
+	// PreviousInfraTemplate should be cleared after successful rollout.
+	if objs.Policy.Status.PreviousInfraTemplate != "" {
+		t.Fatalf("expected PreviousInfraTemplate to be cleared, got %s",
+			objs.Policy.Status.PreviousInfraTemplate)
 	}
 }

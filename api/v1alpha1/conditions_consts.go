@@ -54,4 +54,5 @@ const (
 	ReasonDrainTimeout          = "DrainTimeout"
 	ReasonDrainAborted          = "DrainAborted"
 	ReasonRolloutStalled        = "RolloutStalled"
+	ReasonTemplateReverted      = "TemplateReverted"
 )
