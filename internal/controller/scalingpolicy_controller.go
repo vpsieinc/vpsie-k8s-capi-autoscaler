@@ -856,7 +856,7 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 	// FirewallAttached) to be True, which CAPV doesn't always set for workers.
 	var readyReplicas int32
 	if md.Status.Deprecated != nil && md.Status.Deprecated.V1Beta1 != nil {
-		readyReplicas = md.Status.Deprecated.V1Beta1.ReadyReplicas
+		readyReplicas = md.Status.Deprecated.V1Beta1.ReadyReplicas //nolint:staticcheck // intentional: top-level ReadyReplicas requires all conditions True
 	} else if md.Status.ReadyReplicas != nil {
 		readyReplicas = *md.Status.ReadyReplicas
 	}
