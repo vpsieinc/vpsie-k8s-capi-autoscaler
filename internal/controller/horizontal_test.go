@@ -64,7 +64,7 @@ func TestHorizontal_ScaleUpOnPendingPods(t *testing.T) {
 
 	refreshObject(t, objs.Policy)
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestHorizontal_ScaleUpAtMaxReplicas(t *testing.T) {
 
 	refreshObject(t, objs.Policy)
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestHorizontal_ScaleDownWithBinPack(t *testing.T) {
 
 	refreshObject(t, objs.Policy)
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", utilResult)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", utilResult, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestHorizontal_DrainVerifyAndReduce(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestHorizontal_DrainAbortOnPendingPods(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestHorizontal_DrainTimeout(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -555,7 +555,7 @@ func TestHorizontal_StabilizationWindow(t *testing.T) {
 		},
 	}
 
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", utilResult)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", utilResult, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -618,7 +618,7 @@ func TestHorizontal_RolloutInProgress(t *testing.T) {
 
 	refreshObject(t, objs.Policy)
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -685,7 +685,7 @@ func TestHorizontal_RolloutStalled(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestHorizontal_DryRunScaleUp(t *testing.T) {
 
 	refreshObject(t, objs.Policy)
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -894,7 +894,7 @@ func TestHorizontal_RolloutStalledWithRevert(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -971,7 +971,7 @@ func TestHorizontal_RolloutStalledWithoutPreviousTemplate(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}
@@ -1049,7 +1049,7 @@ func TestHorizontal_ClearPreviousTemplateOnSuccess(t *testing.T) {
 	}
 
 	refreshObject(t, objs.MD)
-	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil)
+	err := r.reconcileHorizontal(ctx, objs.Policy, objs.MD, "test-cluster", nil, nil)
 	if err != nil {
 		t.Fatalf("reconcileHorizontal: %v", err)
 	}

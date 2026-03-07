@@ -24,6 +24,8 @@ rules:
   resources:
   - machinedeployments
   verbs:
+  - create
+  - delete
   - get
   - list
   - patch
@@ -50,6 +52,7 @@ rules:
   - vpsiemachinetemplates
   verbs:
   - create
+  - delete
   - get
   - list
   - watch

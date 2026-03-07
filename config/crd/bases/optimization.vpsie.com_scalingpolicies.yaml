@@ -179,6 +179,33 @@ spec:
                       before allowing a scale-down. Prevents flapping.
                     type: string
                 type: object
+              nodePoolPolicy:
+                description: |-
+                  NodePoolPolicy controls automatic node pool splitting for heterogeneous workloads.
+                  When enabled, the scaler auto-detects pending pods that don't fit on the current
+                  plan and creates satellite MachineDeployments with bigger plans.
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled enables automatic node pool splitting.
+                      When enabled, the scaler detects pending pods whose resource requests
+                      exceed the current plan's capacity and creates satellite MachineDeployments
+                      with appropriately sized plans.
+                    type: boolean
+                  maxPools:
+                    default: 3
+                    description: MaxPools is the maximum number of satellite pools
+                      to create.
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  scaleDownDelay:
+                    description: |-
+                      ScaleDownDelay is how long a satellite pool must have zero workload pods
+                      before it is deleted. Defaults to 10 minutes.
+                    type: string
+                type: object
               osIdentifier:
                 description: OSIdentifier is the image identifier for plan lookups.
                 minLength: 1
@@ -409,6 +436,40 @@ spec:
                   scaling operation.
                 format: date-time
                 type: string
+              nodePools:
+                description: |-
+                  NodePools tracks satellite MachineDeployments created for workloads
+                  that don't fit on the base plan.
+                items:
+                  description: NodePoolStatus tracks a satellite MachineDeployment
+                    created for oversized workloads.
+                  properties:
+                    lastPodSeen:
+                      description: LastPodSeen is the last time a workload pod was
+                        observed on this pool's nodes.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name is the name of the satellite MachineDeployment.
+                      type: string
+                    planId:
+                      description: PlanID is the VPSie plan identifier used for this
+                        pool.
+                      type: string
+                    planNickname:
+                      description: PlanNickname is the human-readable plan name.
+                      type: string
+                    replicas:
+                      description: Replicas is the current replica count.
+                      format: int32
+                      type: integer
+                  required:
+                  - name
+                  - planId
+                  - planNickname
+                  - replicas
+                  type: object
+                type: array
               pendingPods:
                 description: PendingPods is the number of unschedulable pods detected
                   in the workload cluster.
