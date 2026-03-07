@@ -37,19 +37,22 @@ kubectl set image deployment/vpsie-scaler-controller-manager -n vpsie-scaler-sys
 - **internal/scheduler/** — Bin-packing simulator: first-fit-decreasing, taints/tolerations, nodeSelector, nodeAffinity
 - **internal/workload/** — CAPI kubeconfig Secret reader, cached workload cluster clients (5m TTL)
 - **internal/vpsie/** — PricingClient: GET categories, POST /apps/v2/resources for plans
-- **internal/metrics/** — 8 Prometheus metrics (selections, rebalancing, savings, price, utilization, simulations)
+- **internal/metrics/** — 9 Prometheus metrics (selections, rebalancing, savings, price, utilization, simulations, drain operations)
 
 ## Key Patterns
 
 - **After modifying `api/v1alpha1/` types**: Run `make generate && make manifests`
 - **Authentication**: VPSie API uses `Vpsie-Auth` header. Client reads from Secret `data.apiKey`.
-- **Horizontal scale-down**: Threshold check + bin-packing simulation on N-1 nodes before reducing replicas
+- **Horizontal scale-down**: Threshold + bin-packing sim + multi-phase drain (cordon → drain → verify → reduce). 5min drain timeout with auto-uncordon. Uncordons on abort if pending pods appear.
 - **Horizontal scale-up**: +1 replica per reconcile when pending pods detected (avoids over-provisioning)
+- **Stalled rollout detection**: Warning event when `readyReplicas < currentReplicas` for >15 minutes. Alert-only (no auto-revert).
 - **CAPI v1beta2 readyReplicas**: Use `md.Status.Deprecated.V1Beta1.ReadyReplicas` — top-level requires all conditions True
 - **Category A (Shared CPU)**: Memory ballooning — Talos gets balloon minimum, not advertised RAM. Exclude for Talos clusters.
 - **Vertical scaling direction**: Upscale on max(scheduled,actual) > 75% for CPU OR memory. Downscale on min(scheduled,actual) < 5% for BOTH + scheduling sim safe.
 - **DryRun mode**: `spec.dryRun: true` logs recommendations without making changes
 - **Testability**: Reconciler uses `NewPricingClient` factory field and `WorkloadClients` interface for DI. Tests use fakes.
+- **Controller test pattern**: Horizontal tests call `reconcileHorizontal` directly (same package). Use `FakeWorkloadClient` + envtest for MD patching.
+- **Envtest locally**: `KUBEBUILDER_ASSETS="$(pwd)/bin/k8s/1.32.0-darwin-arm64" go test ./internal/controller/ -v -count=1`
 - **Logging**: Uses `klog` V(2) for normal flow, V(4) for detailed API responses
 - **Staging API**: Set `VPSIE_API_URL=https://api2.vpsie.com` env var on the deployment
 - **Go version**: 1.24, controller-runtime v0.22.5, CAPI v1.12.3
