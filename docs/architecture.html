@@ -125,9 +125,9 @@
 
 <!-- ─── Overall progress ─── -->
 <div class="overall">
-  <span class="pct-label" style="color:var(--done)">97%</span>
+  <span class="pct-label" style="color:var(--done)">99%</span>
   <div class="progress-bar">
-    <div class="progress-fill done" style="width:97%">core + utilization complete</div>
+    <div class="progress-fill done" style="width:99%">core + utilization + horizontal scaling complete</div>
   </div>
 </div>
 
@@ -203,7 +203,7 @@
     <rect x="0" y="0" width="280" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
     <circle cx="16" cy="25" r="6" fill="#22c55e"/>
     <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/controller</text>
-    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + determineDirection()</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + Horizontal + Direction</text>
   </g>
 
   <!-- ── internal/metrics ── -->
@@ -375,6 +375,37 @@
   <p>If any pod cannot be placed, downscale is blocked and the blocking pods are reported in the <code>SchedulingSimulation</code> condition.</p>
 </div>
 
+<!-- ─── Horizontal Scaling overview ─── -->
+<h2>Horizontal Scaling</h2>
+<div class="info-box">
+  <h3>How It Works</h3>
+  <p>Horizontal scaling adjusts the <strong>replica count</strong> of a MachineDeployment (adding/removing worker nodes) based on workload demand, complementing vertical scaling (which changes VM plan size).</p>
+  <ul>
+    <li><strong>Scale up:</strong> When unschedulable (Pending) pods are detected in the workload cluster, the scaler increases replicas by 1. Subsequent reconciles add more if pods remain pending.</li>
+    <li><strong>Scale down:</strong> When <em>both</em> CPU and memory utilization are below <code>scaleDownThreshold</code> (default 25%), and a <strong>bin-packing simulation</strong> confirms all non-system pods fit on N-1 nodes, replicas are reduced by 1.</li>
+    <li><strong>Guards:</strong> Respects <code>minReplicas</code>/<code>maxReplicas</code> bounds. Skips scaling when a rollout is in progress (<code>readyReplicas &lt; currentReplicas</code>). Stabilization window prevents flapping.</li>
+    <li><strong>CAPI integration:</strong> Patching <code>MachineDeployment.spec.replicas</code> triggers CAPI's rolling update controller, which handles cordon, drain, and node deletion automatically.</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Horizontal Scale-Down Safety</h3>
+  <p>Before removing a node, the scheduler's bin-packing simulator verifies all workload pods fit on the remaining nodes:</p>
+  <ul>
+    <li><strong>Synthetic plan:</strong> Node allocatable resources are used to construct a virtual plan (no dependency on VPSie plans API)</li>
+    <li><strong>First-fit-decreasing:</strong> Pods sorted by resource requests (largest first), placed onto N-1 virtual nodes</li>
+    <li><strong>Constraint checks:</strong> Resource fit, taints/tolerations, nodeSelector, required nodeAffinity</li>
+    <li><strong>Excluded:</strong> DaemonSet pods and mirror pods (auto-schedule everywhere)</li>
+    <li><strong>If unsafe:</strong> Scale-down is blocked and the reason is logged + set in the <code>HorizontalScaling</code> condition</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>CAPI v1beta2 ReadyReplicas</h3>
+  <p><code>md.Status.ReadyReplicas</code> (*int32) in CAPI v1beta2 requires <strong>ALL</strong> machine conditions to be True (including infra conditions like <code>FirewallAttached</code>, <code>PublicIPAssigned</code>). Since CAPV doesn't always set these for workers, this stays at 0.</p>
+  <p>The scaler uses <code>md.Status.Deprecated.V1Beta1.ReadyReplicas</code> (int32) instead, which counts machines with <code>Ready=True</code> only.</p>
+</div>
+
 <!-- ─── Component cards ─── -->
 <h2>Components</h2>
 <div class="grid">
@@ -484,9 +515,9 @@
       <span class="badge done">Done</span>
     </div>
     <div class="card-path">internal/controller/scalingpolicy_controller.go</div>
-    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Updates <code>CurrentUtilization</code> status.</div>
+    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Horizontal scaling: adds nodes for pending pods, removes nodes when underutilized (with bin-packing safety). Updates <code>CurrentUtilization</code> status.</div>
     <ul class="card-files">
-      <li class="done"><span class="file-name">scalingpolicy_controller.go</span> <span class="file-note">— Reconcile + determineDirection + switchPlan</span></li>
+      <li class="done"><span class="file-name">scalingpolicy_controller.go</span> <span class="file-note">— Reconcile + determineDirection + switchPlan + reconcileHorizontal</span></li>
       <li class="done"><span class="file-name">scalingpolicy_controller_test.go</span> <span class="file-note">— 3 envtest tests</span></li>
     </ul>
   </div>
@@ -592,6 +623,9 @@
     <tr><td>CI pipeline</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Build, lint, multi-arch Docker, cosign</td></tr>
     <tr><td>Unit tests</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>55 tests across vpsie, pricing, selector, workload, utilization, scheduler</td></tr>
     <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>6 tests: dry-run, plan switch, error handling</td></tr>
+    <tr><td>Horizontal scale-up</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Adds 1 replica when pending pods detected, up to <code>maxReplicas</code></td></tr>
+    <tr><td>Horizontal scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Removes 1 replica when CPU+memory below threshold, bin-packing simulation confirms safety</td></tr>
+    <tr><td>Horizontal stabilization window</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable <code>scaleDownStabilization</code>, rollout-in-progress guard</td></tr>
     <tr><td>Leader election</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable via <code>--leader-elect</code></td></tr>
     <tr><td>Health probes</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Liveness + readiness on :8083</td></tr>
     <tr><td style="color:var(--text-dim)">Rollback on stalled rollout</td><td><span class="status-icon" style="color:var(--todo)">&#9679;</span></td><td>Detect stalled MachineDeployment, revert template</td></tr>
@@ -674,12 +708,20 @@
          &bull; Simulation blocked &rarr; <span style="color:var(--accent)">DirectionAny</span> (fallback)
        &bull; In range &rarr; <span style="color:var(--accent)">DirectionAny</span>
     f. Update <span style="color:var(--accent)">status.currentUtilization</span> + Prometheus metrics
-<span style="color:#22c55e"> 7.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
-<span style="color:#22c55e"> 8.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
+<span style="color:#38bdf8"> 7.</span> <strong>reconcileHorizontal()</strong> (if <span style="color:var(--accent)">spec.horizontal.enabled</span>):
+    a. List pending pods in workload cluster
+    b. Pending pods? &rarr; scale up by 1 (up to maxReplicas)
+    c. No pending + CPU &amp; memory &lt; scaleDownThreshold?
+       &rarr; Run bin-packing simulation on N-1 nodes
+       &rarr; <span style="color:#22c55e">Safe</span>: scale down by 1 (above minReplicas)
+       &rarr; <span style="color:#ef4444">Unsafe</span>: block, log blocking pods
+    d. Stabilization window + rollout-in-progress guards
+<span style="color:#22c55e"> 8.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
+<span style="color:#22c55e"> 9.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
    <span style="color:#22c55e">If switch:</span> create new VPSieMachineTemplate &rarr; patch MD <span style="color:var(--accent)">infrastructureRef</span>
               &rarr; <span style="color:var(--text-dim)">CAPI handles rolling update (cordon, drain, replace)</span>
-<span style="color:#22c55e"> 9.</span> Update status: currentPlan, recommendedPlan, savings, utilization, conditions, phase
-<span style="color:#22c55e">10.</span> Requeue after 60s
+<span style="color:#22c55e">10.</span> Update status: currentPlan, recommendedPlan, savings, utilization, conditions, phase
+<span style="color:#22c55e">11.</span> Requeue after 60s
 </pre>
 </div>
 
@@ -692,12 +734,15 @@
     <li><strong>Eager upscaling:</strong> Triggers if EITHER CPU or memory exceeds 75% using <code>max(scheduled, actual)</code>. Savings threshold is relaxed to 0 (capacity &gt; cost).</li>
     <li><strong>Graceful degradation:</strong> Kubeconfig secret missing? Metrics-server down? Calculator error? &rarr; All degrade gracefully to <code>DirectionAny</code> with conditions set for observability.</li>
     <li><strong>DaemonSet &amp; mirror pod exclusion:</strong> Scheduling simulation ignores pods that auto-schedule everywhere, preventing false positives.</li>
+    <li><strong>Horizontal bin-packing:</strong> Before removing a node, bin-packing simulation verifies all pods fit on N-1 nodes. Scale-down blocked if pods would become unschedulable.</li>
+    <li><strong>Scale 1 at a time:</strong> Both horizontal scale-up and scale-down change replicas by 1 per reconcile, preventing over-/under-provisioning oscillation.</li>
+    <li><strong>Rollout awareness:</strong> Horizontal scaling skips when <code>readyReplicas &lt; currentReplicas</code> (machines still provisioning). Uses CAPI v1beta1 deprecated field for accurate ready counts.</li>
     <li><strong>Observability:</strong> 6 condition types, 20 reason codes, 8 Prometheus metrics provide full visibility into every decision.</li>
   </ul>
 </div>
 
 <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);color:var(--text-dim);font-size:.8rem;text-align:center;">
-  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 60 tests passing, 38 source files
+  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 60+ tests passing, 38 source files — Last updated: 2026-03-07
 </div>
 
 </body>
