@@ -747,6 +747,77 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		maxReplicas = 10
 	}
 
+	// Check if a drain is in progress from a previous reconcile.
+	// If so, verify pods have been rescheduled before reducing replicas.
+	if policy.Status.DrainingNode != "" {
+		nodeName := policy.Status.DrainingNode
+		remaining, err := wc.GetNonSystemPodCount(ctx, nodeName)
+		if err != nil {
+			klog.V(2).Infof("horizontal: error checking drain status for %s: %v", nodeName, err)
+			return fmt.Errorf("checking drain status for %s: %w", nodeName, err)
+		}
+
+		if remaining > 0 {
+			klog.V(2).Infof("horizontal: drain in progress on %s, %d pods remaining", nodeName, remaining)
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionTrue,
+				Reason:  optv1.ReasonScaleDownReplicas,
+				Message: fmt.Sprintf("Drain in progress on %s (%d pods remaining)", nodeName, remaining),
+			})
+			return nil // requeue will check again
+		}
+
+		// Drain complete — check no new pending pods before reducing replicas
+		postDrainPending, err := wc.ListPendingPods(ctx)
+		if err != nil {
+			return fmt.Errorf("listing pending pods after drain: %w", err)
+		}
+		if len(postDrainPending) > 0 {
+			klog.V(2).Infof("horizontal: drain of %s complete but %d pods pending — aborting scale-down", nodeName, len(postDrainPending))
+			policy.Status.DrainingNode = ""
+			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+				Type:    optv1.HorizontalScalingCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  optv1.ReasonScaleDownReplicas,
+				Message: fmt.Sprintf("Drain complete on %s but %d pods pending — scale-down aborted", nodeName, len(postDrainPending)),
+			})
+			return nil
+		}
+
+		// All pods rescheduled, no pending pods — safe to reduce replicas
+		desired := currentReplicas - 1
+		if desired < minReplicas {
+			desired = minReplicas
+		}
+
+		patch := client.MergeFrom(md.DeepCopy())
+		md.Spec.Replicas = &desired
+		if err := r.Patch(ctx, md, patch); err != nil {
+			return fmt.Errorf("patching replicas after drain: %w", err)
+		}
+
+		now := metav1.Now()
+		policy.Status.LastScaleTime = &now
+		policy.Status.CurrentReplicas = desired
+		policy.Status.DrainingNode = ""
+
+		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+			Type:    optv1.HorizontalScalingCondition,
+			Status:  metav1.ConditionTrue,
+			Reason:  optv1.ReasonScaleDownReplicas,
+			Message: fmt.Sprintf("Scaled down %d→%d after draining node %s", currentReplicas, desired, nodeName),
+		})
+
+		r.Recorder.Eventf(policy, corev1.EventTypeNormal, "HorizontalScaleDown",
+			"Scaled MachineDeployment %s from %d to %d replicas after draining node %s",
+			md.Name, currentReplicas, desired, nodeName)
+
+		klog.V(2).Infof("horizontal: scaled %s %d→%d after draining %s",
+			md.Name, currentReplicas, desired, nodeName)
+		return nil
+	}
+
 	// Don't scale if a previous scale operation is still in progress
 	// (new machines are still provisioning — avoids feedback loop)
 	//
@@ -880,14 +951,9 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		if len(utilResult.Nodes) > 0 {
 			n := utilResult.Nodes[0]
 			syntheticPlan := vpsie.Plan{
-				CPU: int(n.AllocatableCPU / 1000),
-				RAM: int(n.AllocatableRAM / (1024 * 1024)),
+				CPU: int((n.AllocatableCPU + 100) / 1000),
+				RAM: int((n.AllocatableRAM + 256*1024*1024) / (1024 * 1024)),
 			}
-			// The simulator uses plan CPU/RAM to compute capacity, but we
-			// already have the exact allocatable. Bump CPU+1 and RAM to
-			// offset the kubelet-reserved subtraction inside the simulator.
-			syntheticPlan.CPU = int((n.AllocatableCPU + 100) / 1000)
-			syntheticPlan.RAM = int((n.AllocatableRAM + 256*1024*1024) / (1024 * 1024))
 
 			sim := scheduler.NewSimulator()
 			simResult := sim.SimulateDownscale(utilResult.Nodes, syntheticPlan, int(desired))
@@ -918,29 +984,39 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 			return nil
 		}
 
-		patch := client.MergeFrom(md.DeepCopy())
-		md.Spec.Replicas = &desired
-		if err := r.Patch(ctx, md, patch); err != nil {
-			return fmt.Errorf("patching replicas for scale-down: %w", err)
+		// Multi-phase scale-down: cordon → drain → verify → reduce replicas
+		// Pick the least-utilized node as the drain target.
+		targetNode := r.leastUtilizedNode(utilResult)
+		if targetNode == "" {
+			klog.V(2).Infof("horizontal: no target node for scale-down")
+			return nil
 		}
 
-		now := metav1.Now()
-		policy.Status.LastScaleTime = &now
-		policy.Status.CurrentReplicas = desired
+		// Phase 1: Cordon the target node
+		if err := wc.CordonNode(ctx, targetNode); err != nil {
+			return fmt.Errorf("cordoning node %s: %w", targetNode, err)
+		}
+
+		// Phase 2: Drain the target node (evict pods)
+		evicted, err := wc.DrainNode(ctx, targetNode)
+		if err != nil {
+			return fmt.Errorf("draining node %s: %w", targetNode, err)
+		}
+		klog.V(2).Infof("horizontal: drained node %s, evicted %d pods", targetNode, evicted)
+
+		// Track the draining node so next reconcile can verify completion
+		policy.Status.DrainingNode = targetNode
 
 		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 			Type:    optv1.HorizontalScalingCondition,
 			Status:  metav1.ConditionTrue,
 			Reason:  optv1.ReasonScaleDownReplicas,
-			Message: fmt.Sprintf("Scaled down %d→%d (CPU: %d%%, Mem: %d%%)", currentReplicas, desired, cpuPct, memPct),
+			Message: fmt.Sprintf("Draining node %s (evicted %d pods), waiting for pods to reschedule", targetNode, evicted),
 		})
 
-		r.Recorder.Eventf(policy, corev1.EventTypeNormal, "HorizontalScaleDown",
-			"Scaled MachineDeployment %s from %d to %d replicas (low utilization)",
-			md.Name, currentReplicas, desired)
-
-		klog.V(2).Infof("horizontal: scaled down %s %d→%d (CPU: %d%%, Mem: %d%%)",
-			md.Name, currentReplicas, desired, cpuPct, memPct)
+		r.Recorder.Eventf(policy, corev1.EventTypeNormal, "HorizontalDrain",
+			"Draining node %s for scale-down %d→%d (evicted %d pods)",
+			targetNode, currentReplicas, desired, evicted)
 		return nil
 	}
 
@@ -951,4 +1027,31 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 		Message: "No pending pods, utilization within range",
 	})
 	return nil
+}
+
+// leastUtilizedNode returns the name of the node with the lowest combined
+// CPU+memory utilization (by requests). Used to pick the drain target for
+// scale-down, minimizing disruption.
+func (r *ScalingPolicyReconciler) leastUtilizedNode(utilResult *utilization.Result) string {
+	if utilResult == nil || len(utilResult.Nodes) == 0 {
+		return ""
+	}
+
+	bestIdx := 0
+	bestScore := float64(2) // > max possible (1.0 + 1.0)
+	for i, n := range utilResult.Nodes {
+		var cpuRatio, memRatio float64
+		if n.AllocatableCPU > 0 {
+			cpuRatio = float64(n.RequestedCPU) / float64(n.AllocatableCPU)
+		}
+		if n.AllocatableRAM > 0 {
+			memRatio = float64(n.RequestedRAM) / float64(n.AllocatableRAM)
+		}
+		score := cpuRatio + memRatio
+		if score < bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	return utilResult.Nodes[bestIdx].NodeName
 }

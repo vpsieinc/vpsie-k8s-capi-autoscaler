@@ -289,6 +289,11 @@ type ScalingPolicyStatus struct {
 	// +optional
 	LastScaleTime *metav1.Time `json:"lastScaleTime,omitempty"`
 
+	// DrainingNode is the name of the node currently being drained for scale-down.
+	// When set, the controller will verify the drain is complete before reducing replicas.
+	// +optional
+	DrainingNode string `json:"drainingNode,omitempty"`
+
 	// Phase is the current phase of the ScalingPolicy.
 	// +optional
 	Phase ScalingPolicyPhase `json:"phase,omitempty"`

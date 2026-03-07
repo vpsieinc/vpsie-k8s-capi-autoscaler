@@ -9,14 +9,21 @@ import (
 
 // FakeWorkloadClient implements WorkloadClient for testing.
 type FakeWorkloadClient struct {
-	Nodes        []corev1.Node
-	Pods         []corev1.Pod
-	PendingPods  []corev1.Pod
-	NodeMetrics  []metricsv1beta1.NodeMetrics
-	NodesErr     error
-	PodsErr      error
-	PendingErr   error
-	MetricsErr   error
+	Nodes              []corev1.Node
+	Pods               []corev1.Pod
+	PendingPods        []corev1.Pod
+	NodeMetrics        []metricsv1beta1.NodeMetrics
+	NodesErr           error
+	PodsErr            error
+	PendingErr         error
+	MetricsErr         error
+	CordonErr          error
+	DrainEvicted       int
+	DrainErr           error
+	NonSystemPodCount  int
+	NonSystemPodErr    error
+	CordonedNodes      []string
+	DrainedNodes       []string
 }
 
 func (f *FakeWorkloadClient) ListNodes(_ context.Context, _ string) ([]corev1.Node, error) {
@@ -33,6 +40,20 @@ func (f *FakeWorkloadClient) ListPendingPods(_ context.Context) ([]corev1.Pod, e
 
 func (f *FakeWorkloadClient) GetNodeMetrics(_ context.Context, _ []string) ([]metricsv1beta1.NodeMetrics, error) {
 	return f.NodeMetrics, f.MetricsErr
+}
+
+func (f *FakeWorkloadClient) CordonNode(_ context.Context, nodeName string) error {
+	f.CordonedNodes = append(f.CordonedNodes, nodeName)
+	return f.CordonErr
+}
+
+func (f *FakeWorkloadClient) DrainNode(_ context.Context, nodeName string) (int, error) {
+	f.DrainedNodes = append(f.DrainedNodes, nodeName)
+	return f.DrainEvicted, f.DrainErr
+}
+
+func (f *FakeWorkloadClient) GetNonSystemPodCount(_ context.Context, _ string) (int, error) {
+	return f.NonSystemPodCount, f.NonSystemPodErr
 }
 
 // FakeWorkloadClientFactory implements WorkloadClientFactory for testing.
