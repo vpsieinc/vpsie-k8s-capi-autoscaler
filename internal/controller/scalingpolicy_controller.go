@@ -563,6 +563,9 @@ func (r *ScalingPolicyReconciler) switchPlan(
 		klog.V(2).Infof("created VPSieMachineTemplate %s with plan %s", newTemplate.Name, plan.Nickname)
 	}
 
+	// Save current template name for rollback on stalled rollout
+	policy.Status.PreviousInfraTemplate = md.Spec.Template.Spec.InfrastructureRef.Name
+
 	// Patch MachineDeployment's infrastructureRef to point to the new template
 	patch := client.MergeFrom(md.DeepCopy())
 	md.Spec.Template.Spec.InfrastructureRef.Name = newTemplate.Name
@@ -863,17 +866,40 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 	if currentReplicas > readyReplicas {
 		// Check if the rollout has stalled (no progress for too long)
 		if policy.Status.LastScaleTime != nil && time.Since(policy.Status.LastScaleTime.Time) > defaultRolloutStallTimeout {
-			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
-				Type:    optv1.HorizontalScalingCondition,
-				Status:  metav1.ConditionFalse,
-				Reason:  optv1.ReasonRolloutStalled,
-				Message: fmt.Sprintf("Rollout stalled: %d/%d ready for %s", readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second)),
-			})
-			r.Recorder.Eventf(policy, corev1.EventTypeWarning, "RolloutStalled",
-				"MachineDeployment %s rollout stalled: %d/%d ready for %s",
-				md.Name, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
-			klog.V(2).Infof("horizontal: rollout stalled for %s (%d/%d ready, last scale %s ago)",
-				md.Name, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
+			// If we have a previous template, revert the MachineDeployment to it
+			if policy.Status.PreviousInfraTemplate != "" {
+				prevTemplate := policy.Status.PreviousInfraTemplate
+				patch := client.MergeFrom(md.DeepCopy())
+				md.Spec.Template.Spec.InfrastructureRef.Name = prevTemplate
+				if err := r.Patch(ctx, md, patch); err != nil {
+					return fmt.Errorf("reverting MachineDeployment %s to template %s: %w", md.Name, prevTemplate, err)
+				}
+				policy.Status.PreviousInfraTemplate = ""
+				meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+					Type:    optv1.PlanSelectedCondition,
+					Status:  metav1.ConditionFalse,
+					Reason:  optv1.ReasonTemplateReverted,
+					Message: fmt.Sprintf("Reverted to template %s after stalled rollout (%d/%d ready for %s)", prevTemplate, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second)),
+				})
+				r.Recorder.Eventf(policy, corev1.EventTypeWarning, "TemplateReverted",
+					"Reverted MachineDeployment %s to template %s after stalled rollout (%d/%d ready for %s)",
+					md.Name, prevTemplate, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
+				klog.V(2).Infof("horizontal: reverted %s to template %s after stalled rollout (%d/%d ready)",
+					md.Name, prevTemplate, readyReplicas, currentReplicas)
+			} else {
+				// No previous template — this is a horizontal stall, alert only
+				meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+					Type:    optv1.HorizontalScalingCondition,
+					Status:  metav1.ConditionFalse,
+					Reason:  optv1.ReasonRolloutStalled,
+					Message: fmt.Sprintf("Rollout stalled: %d/%d ready for %s", readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second)),
+				})
+				r.Recorder.Eventf(policy, corev1.EventTypeWarning, "RolloutStalled",
+					"MachineDeployment %s rollout stalled: %d/%d ready for %s",
+					md.Name, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
+				klog.V(2).Infof("horizontal: rollout stalled for %s (%d/%d ready, last scale %s ago)",
+					md.Name, readyReplicas, currentReplicas, time.Since(policy.Status.LastScaleTime.Time).Round(time.Second))
+			}
 		} else {
 			meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 				Type:    optv1.HorizontalScalingCondition,
@@ -884,6 +910,12 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 			klog.V(2).Infof("horizontal: waiting for nodes %d/%d ready", readyReplicas, currentReplicas)
 		}
 		return nil
+	}
+
+	// Rollout completed successfully — clear previous template tracking
+	if policy.Status.PreviousInfraTemplate != "" {
+		klog.V(2).Infof("horizontal: rollout completed, clearing previousInfraTemplate for %s", md.Name)
+		policy.Status.PreviousInfraTemplate = ""
 	}
 
 	// Scale up: pending pods exist

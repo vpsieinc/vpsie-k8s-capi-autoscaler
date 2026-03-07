@@ -416,6 +416,11 @@ spec:
               phase:
                 description: Phase is the current phase of the ScalingPolicy.
                 type: string
+              previousInfraTemplate:
+                description: |-
+                  PreviousInfraTemplate is the name of the VPSieMachineTemplate that was in use
+                  before the last plan switch. Used to revert on stalled rollouts.
+                type: string
               recommendedPlan:
                 description: RecommendedPlan is the plan the controller recommends
                   switching to.

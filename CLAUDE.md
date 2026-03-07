@@ -45,7 +45,7 @@ kubectl set image deployment/vpsie-scaler-controller-manager -n vpsie-scaler-sys
 - **Authentication**: VPSie API uses `Vpsie-Auth` header. Client reads from Secret `data.apiKey`.
 - **Horizontal scale-down**: Threshold + bin-packing sim + multi-phase drain (cordon → drain → verify → reduce). 5min drain timeout with auto-uncordon. Uncordons on abort if pending pods appear.
 - **Horizontal scale-up**: +1 replica per reconcile when pending pods detected (avoids over-provisioning)
-- **Stalled rollout detection**: Warning event when `readyReplicas < currentReplicas` for >15 minutes. Alert-only (no auto-revert).
+- **Stalled rollout detection**: When `readyReplicas < currentReplicas` for >15 minutes: if `PreviousInfraTemplate` set (vertical stall), auto-reverts `infrastructureRef` to previous template. If unset (horizontal stall), alert-only.
 - **CAPI v1beta2 readyReplicas**: Use `md.Status.Deprecated.V1Beta1.ReadyReplicas` — top-level requires all conditions True
 - **Category A (Shared CPU)**: Memory ballooning — Talos gets balloon minimum, not advertised RAM. Exclude for Talos clusters.
 - **Vertical scaling direction**: Upscale on max(scheduled,actual) > 75% for CPU OR memory. Downscale on min(scheduled,actual) < 5% for BOTH + scheduling sim safe.

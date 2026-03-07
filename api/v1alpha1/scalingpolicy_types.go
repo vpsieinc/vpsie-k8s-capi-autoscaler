@@ -299,6 +299,11 @@ type ScalingPolicyStatus struct {
 	// +optional
 	DrainingStartedAt *metav1.Time `json:"drainingStartedAt,omitempty"`
 
+	// PreviousInfraTemplate is the name of the VPSieMachineTemplate that was in use
+	// before the last plan switch. Used to revert on stalled rollouts.
+	// +optional
+	PreviousInfraTemplate string `json:"previousInfraTemplate,omitempty"`
+
 	// Phase is the current phase of the ScalingPolicy.
 	// +optional
 	Phase ScalingPolicyPhase `json:"phase,omitempty"`

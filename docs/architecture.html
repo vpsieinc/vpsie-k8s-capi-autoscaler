@@ -125,9 +125,9 @@
 
 <!-- ─── Overall progress ─── -->
 <div class="overall">
-  <span class="pct-label" style="color:var(--done)">99%</span>
+  <span class="pct-label" style="color:var(--done)">100%</span>
   <div class="progress-bar">
-    <div class="progress-fill done" style="width:99%">core + utilization + horizontal scaling complete</div>
+    <div class="progress-fill done" style="width:100%">core + utilization + horizontal scaling + stalled rollout revert complete</div>
   </div>
 </div>
 
@@ -695,16 +695,16 @@ flowchart TD
     </ul>
   </div>
 
-  <div class="card partial">
+  <div class="card done">
     <div class="card-head">
-      <span class="card-title">Stalled Rollout Detection</span>
-      <span class="badge partial">Alert only</span>
+      <span class="card-title">Stalled Rollout Detection + Auto-Revert</span>
+      <span class="badge done">Done</span>
     </div>
     <div class="card-path">internal/controller/</div>
-    <div class="card-desc">Detects when readyReplicas &lt; currentReplicas for &gt;15 minutes. Emits warning event + sets <code>RolloutStalled</code> condition. Auto-revert not yet implemented (too risky for v1).</div>
+    <div class="card-desc">Detects when readyReplicas &lt; currentReplicas for &gt;15 minutes. For vertical stalls (plan switch), auto-reverts <code>infrastructureRef</code> to <code>status.previousInfraTemplate</code>. For horizontal stalls, emits warning event only.</div>
     <ul class="card-files">
       <li class="done"><span class="file-name">Stall detection</span> <span class="file-note">— 15min timeout on readyReplicas &lt; currentReplicas</span></li>
-      <li class="todo"><span class="file-name">Template rollback</span> <span class="file-note">— revert infraRef to previous template (future)</span></li>
+      <li class="done"><span class="file-name">Template rollback</span> <span class="file-note">— reverts infraRef via <code>status.previousInfraTemplate</code></span></li>
     </ul>
   </div>
 
@@ -740,18 +740,18 @@ flowchart TD
     <tr><td>Kustomize deployment</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>CRD + RBAC + manager overlays</td></tr>
     <tr><td>CI pipeline</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Build, lint, multi-arch Docker, cosign</td></tr>
     <tr><td>Unit tests</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>55 tests across vpsie, pricing, selector, workload, utilization, scheduler</td></tr>
-    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>17 tests: vertical (dry-run, plan switch, error) + horizontal (scale-up/down, drain, timeout, stalled)</td></tr>
+    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>20 tests: vertical (dry-run, plan switch, error) + horizontal (scale-up/down, drain, timeout, stalled, revert)</td></tr>
     <tr><td>Horizontal scale-up</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Adds 1 replica when pending pods detected, up to <code>maxReplicas</code></td></tr>
     <tr><td>Horizontal scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Multi-phase: bin-packing sim &rarr; cordon &rarr; drain &rarr; verify rescheduled &rarr; reduce replicas</td></tr>
     <tr><td>Node drain before scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Evicts pods via <code>policyv1.Eviction</code>, verifies 0 non-system pods + no pending before reducing replicas. Tracks via <code>status.drainingNode</code></td></tr>
     <tr><td>Drain timeout</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>5min timeout — auto-uncordons node and aborts if drain takes too long (PDB-blocked pods). Tracked via <code>status.drainingStartedAt</code></td></tr>
     <tr><td>Uncordon on abort</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Uncordons drained node when scale-down is aborted (pending pods post-drain or timeout) to prevent wasted capacity</td></tr>
-    <tr><td>Stalled rollout detection</td><td><span class="status-icon" style="color:var(--partial)">&#9679;</span></td><td>Warning event when readyReplicas &lt; currentReplicas for &gt;15min. Alert-only, no auto-revert</td></tr>
+    <tr><td>Stalled rollout detection + auto-revert</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>15min timeout: vertical stalls auto-revert <code>infrastructureRef</code> to previous template; horizontal stalls emit warning only</td></tr>
     <tr><td>Drain metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td><code>DrainOperationsTotal</code> counter: started, completed, aborted, timeout</td></tr>
     <tr><td>Horizontal stabilization window</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable <code>scaleDownStabilization</code>, rollout-in-progress guard, drain-in-progress guard</td></tr>
     <tr><td>Leader election</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable via <code>--leader-elect</code></td></tr>
     <tr><td>Health probes</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Liveness + readiness on :8083</td></tr>
-    <tr><td style="color:var(--text-dim)">Rollback on stalled rollout</td><td><span class="status-icon" style="color:var(--todo)">&#9679;</span></td><td>Auto-revert template when rollout stalls (future — detection is done, revert is not)</td></tr>
+    <tr><td>Rollback on stalled rollout</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Auto-reverts <code>infrastructureRef</code> to <code>status.previousInfraTemplate</code> when vertical rollout stalls &gt;15min</td></tr>
   </tbody>
 </table>
 
@@ -803,9 +803,9 @@ flowchart TD
   <div class="card done">
     <div class="card-head">
       <span class="card-title">internal/controller</span>
-      <span class="badge done">17 tests</span>
+      <span class="badge done">20 tests</span>
     </div>
-    <div class="card-desc">Envtest: dry-run, plan switch, target-not-found, scale-up (pending pods, max replicas, dry-run), scale-down (bin-pack, drain+verify, drain abort+uncordon, drain timeout, stabilization, rollout in-progress, rollout stalled). Unit: cooldown, replicas, leader, leastUtilizedNode</div>
+    <div class="card-desc">Envtest: dry-run, plan switch, target-not-found, scale-up (pending pods, max replicas, dry-run), scale-down (bin-pack, drain+verify, drain abort+uncordon, drain timeout, stabilization, rollout in-progress, rollout stalled+revert, stalled no-revert, clear-on-success). Unit: cooldown, replicas, leader, leastUtilizedNode</div>
   </div>
 </div>
 
@@ -844,6 +844,8 @@ flowchart TD
        &rarr; <span style="color:#ef4444">Unsafe</span>: block, log blocking pods
        &rarr; <span style="color:#22c55e">Safe</span>: cordon least-utilized node &rarr; drain (evict pods) &rarr; set <span style="color:var(--accent)">status.drainingNode</span>
     e. Stabilization window + rollout-in-progress + drain-in-progress guards
+       &bull; Stalled &gt;15min + <span style="color:var(--accent)">previousInfraTemplate</span> set? &rarr; <span style="color:#ef4444">revert</span> infraRef to previous template
+       &bull; Stalled &gt;15min + no previous template? &rarr; <span style="color:#f59e0b">alert only</span> (horizontal stall)
 <span style="color:#22c55e"> 8.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
 <span style="color:#22c55e"> 9.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
    <span style="color:#22c55e">If switch:</span> create new VPSieMachineTemplate &rarr; patch MD <span style="color:var(--accent)">infrastructureRef</span>
@@ -867,8 +869,8 @@ flowchart TD
     <li><strong>Drain timeout:</strong> 5-minute timeout prevents stuck drains (e.g. PDB-blocked pods). On timeout, the node is automatically uncordoned and drain state is cleared. Emits a <code>DrainTimeout</code> warning event.</li>
     <li><strong>Uncordon on abort:</strong> Whenever a drain is aborted (pending pods or timeout), the node is uncordoned to prevent wasted capacity from a cordoned-but-not-removed node.</li>
     <li><strong>Scale 1 at a time:</strong> Both horizontal scale-up and scale-down change replicas by 1 per reconcile, preventing over-/under-provisioning oscillation.</li>
-    <li><strong>Rollout awareness:</strong> Horizontal scaling skips when <code>readyReplicas &lt; currentReplicas</code> (machines still provisioning) or drain is in progress (<code>status.drainingNode</code> set). Uses CAPI v1beta1 deprecated field for accurate ready counts. Stalled rollouts (&gt;15min) emit warning events.</li>
-    <li><strong>Observability:</strong> 7 condition types, 29 reason codes, 9 Prometheus metrics provide full visibility into every decision.</li>
+    <li><strong>Rollout awareness:</strong> Horizontal scaling skips when <code>readyReplicas &lt; currentReplicas</code> (machines still provisioning) or drain is in progress (<code>status.drainingNode</code> set). Uses CAPI v1beta1 deprecated field for accurate ready counts. Stalled vertical rollouts (&gt;15min) auto-revert to previous template; horizontal stalls emit warning events.</li>
+    <li><strong>Observability:</strong> 7 condition types, 30 reason codes, 9 Prometheus metrics provide full visibility into every decision.</li>
   </ul>
 </div>
 
