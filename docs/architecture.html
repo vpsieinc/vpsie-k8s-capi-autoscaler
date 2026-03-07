@@ -127,7 +127,7 @@
 <div class="overall">
   <span class="pct-label" style="color:var(--done)">100%</span>
   <div class="progress-bar">
-    <div class="progress-fill done" style="width:100%">core + utilization + horizontal scaling + stalled rollout revert complete</div>
+    <div class="progress-fill done" style="width:100%">core + utilization + horizontal scaling + node pool auto-splitting + stalled rollout revert complete</div>
   </div>
 </div>
 
@@ -203,7 +203,7 @@
     <rect x="0" y="0" width="280" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
     <circle cx="16" cy="25" r="6" fill="#22c55e"/>
     <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/controller</text>
-    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + Horizontal + Direction</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">Reconciler + Rebalancer + Horizontal + NodePool + Direction</text>
   </g>
 
   <!-- ── internal/metrics ── -->
@@ -211,7 +211,7 @@
     <rect x="0" y="0" width="220" height="50" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2"/>
     <circle cx="16" cy="25" r="6" fill="#22c55e"/>
     <text x="30" y="20" fill="#e2e8f0" font-size="13" font-weight="700">internal/metrics</text>
-    <text x="30" y="36" fill="#94a3b8" font-size="10">8 Prometheus counters/gauges/histograms</text>
+    <text x="30" y="36" fill="#94a3b8" font-size="10">10 Prometheus counters/gauges/histograms</text>
   </g>
 
   <!-- ── internal/pricing ── -->
@@ -432,6 +432,35 @@
   <p>The scaler uses <code>md.Status.Deprecated.V1Beta1.ReadyReplicas</code> (int32) instead, which counts machines with <code>Ready=True</code> only.</p>
 </div>
 
+<!-- ─── Node Pool Auto-Splitting overview ─── -->
+<h2>Node Pool Auto-Splitting</h2>
+<div class="info-box">
+  <h3>How It Works</h3>
+  <p>Node pool auto-splitting detects <strong>oversized workloads</strong> — pods whose resource requests exceed the current plan's capacity — and automatically creates <strong>satellite MachineDeployments</strong> with bigger plans. This lets a cluster run heterogeneous node types without manual intervention.</p>
+  <ul>
+    <li><strong>Auto-detect:</strong> When <code>spec.nodePoolPolicy.enabled</code>, the scaler analyzes each pending pod's CPU/memory requests against the current plan's allocatable capacity (plan resources minus kubelet reserved).</li>
+    <li><strong>Plan selection:</strong> For pods that don't fit, the scaler finds the <strong>cheapest plan</strong> from the pricing cache that can accommodate the pod, respecting the same <code>constraints</code> (min/max CPU/RAM/SSD, excluded plans).</li>
+    <li><strong>Satellite creation:</strong> A new <code>VPSieMachineTemplate</code> + <code>MachineDeployment</code> is created, cloning DC, image, and bootstrap config from the base MD. Named <code>{base-md}-pool-{plan-nickname}</code>.</li>
+    <li><strong>Routing:</strong> No pod modifications needed — the Kubernetes scheduler naturally places oversized pods on satellite nodes since they're the only ones with sufficient capacity.</li>
+    <li><strong>Scale-up:</strong> If oversized pods remain pending and the satellite is at capacity (readyReplicas == replicas), the satellite is scaled up by +1 per reconcile.</li>
+    <li><strong>Cleanup:</strong> When a satellite has zero workload pods for longer than <code>scaleDownDelay</code> (default 10 minutes), both the satellite MD and its template are deleted.</li>
+    <li><strong>Guards:</strong> <code>maxPools</code> limits satellite count (default 3). DryRun mode logs but doesn't create. Oversized pods are filtered out of base horizontal scaling to prevent wasteful scale-up on small nodes.</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Satellite MachineDeployment Lifecycle</h3>
+  <ol style="margin-top:.5rem;padding-left:1.5rem;">
+    <li><strong>Detection:</strong> Pending pod requests exceed current plan capacity (e.g., 32GB RAM on 8GB nodes)</li>
+    <li><strong>Plan match:</strong> Find cheapest plan that fits from pricing cache, respecting <code>constraints</code></li>
+    <li><strong>Create:</strong> Clone base MD config → new VPSieMachineTemplate + MachineDeployment with <code>replicas=1</code></li>
+    <li><strong>Track:</strong> Satellite recorded in <code>status.nodePools[]</code> with plan ID, nickname, replicas, <code>lastPodSeen</code></li>
+    <li><strong>Scale:</strong> If more oversized pods remain pending and satellite rollout is complete, scale up +1</li>
+    <li><strong>Cleanup:</strong> No workload pods for <code>scaleDownDelay</code> → delete satellite MD + template, remove from status</li>
+  </ol>
+  <p style="margin-top:.5rem;color:var(--text-dim);font-size:.85rem;">Satellites are labeled <code>optimization.vpsie.com/satellite-of: &lt;base-md-name&gt;</code> so the controller watches them and triggers reconciles on changes.</p>
+</div>
+
 <!-- ─── Scaling Logic Flowchart ─── -->
 <h2>Scaling Decision Flowchart</h2>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
@@ -448,7 +477,6 @@ flowchart TD
     PLAN --> UTIL[Calculate Utilization via Workload Client]
 
     UTIL --> HORIZ{Horizontal Enabled?}
-    HORIZ -->|No| VERT_DIR
     HORIZ -->|Yes| H_DRAIN{status.drainingNode set?}
     H_DRAIN -->|Yes| H_CHECK{Pods remaining on node?}
     H_CHECK -->|Yes| H_DRAINING[Requeue: drain in progress]
@@ -476,16 +504,40 @@ flowchart TD
     H_CORDON --> H_EVICT[Drain: evict pods]
     H_EVICT --> H_TRACK[Set status.drainingNode, requeue]
 
-    H_UP --> VERT_DIR
-    H_COMPLETE --> VERT_DIR
-    H_ABORT --> VERT_DIR
-    H_DRAINING --> VERT_DIR
-    H_TRACK --> VERT_DIR
-    H_WAIT --> VERT_DIR
-    H_OK --> VERT_DIR
-    H_BLOCKED --> VERT_DIR
-    H_UNSAFE --> VERT_DIR
-    H_COOL --> VERT_DIR
+    H_UP --> NP_CHECK
+    H_COMPLETE --> NP_CHECK
+    H_ABORT --> NP_CHECK
+    H_DRAINING --> NP_CHECK
+    H_TRACK --> NP_CHECK
+    H_WAIT --> NP_CHECK
+    H_OK --> NP_CHECK
+    H_BLOCKED --> NP_CHECK
+    H_UNSAFE --> NP_CHECK
+    H_COOL --> NP_CHECK
+
+    NP_CHECK{NodePool Policy Enabled?}
+    NP_CHECK -->|No| VERT_DIR
+    NP_CHECK -->|Yes| NP_PEND[List Pending Pods]
+    NP_PEND --> NP_OVER{Oversized pods exist?}
+    NP_OVER -->|No| NP_CLEAN[Cleanup empty satellites]
+    NP_OVER -->|Yes| NP_PLAN[Find cheapest fitting plan per pod]
+    NP_PLAN --> NP_SAT{Satellite MD exists?}
+    NP_SAT -->|Yes| NP_SCALE[Scale satellite +1]
+    NP_SAT -->|No| NP_MAX{At maxPools?}
+    NP_MAX -->|Yes| NP_LIMIT[Log: max pools reached]
+    NP_MAX -->|No| NP_CREATE[Create satellite MD + Template]
+    NP_SCALE --> NP_CLEAN
+    NP_CREATE --> NP_CLEAN
+    NP_LIMIT --> NP_CLEAN
+    NP_CLEAN --> VERT_DIR
+
+    HORIZ -->|No| NP_CHECK2{NodePool Policy Enabled?}
+    NP_CHECK2 -->|No| VERT_DIR
+    NP_CHECK2 -->|Yes| NP_PEND2[List Pending Pods]
+    NP_PEND2 --> NP_OVER2{Oversized pods exist?}
+    NP_OVER2 -->|No| NP_CLEAN2[Cleanup empty satellites]
+    NP_OVER2 -->|Yes| NP_PLAN
+    NP_CLEAN2 --> VERT_DIR
 
     VERT_DIR{Utilization Direction?}
     VERT_DIR -->|"CPU OR Mem > 75%"| DIR_UP[DirectionUp]
@@ -521,6 +573,11 @@ flowchart TD
     style H_UNSAFE fill:#f59e0b,stroke:#d97706,color:#000
     style H_BLOCKED fill:#f59e0b,stroke:#d97706,color:#000
     style DRY_LOG fill:#f59e0b,stroke:#d97706,color:#000
+    style NP_CREATE fill:#22c55e,stroke:#16a34a,color:#fff
+    style NP_SCALE fill:#22c55e,stroke:#16a34a,color:#fff
+    style NP_LIMIT fill:#f59e0b,stroke:#d97706,color:#000
+    style NP_CLEAN fill:#94a3b8,stroke:#64748b,color:#000
+    style NP_CLEAN2 fill:#94a3b8,stroke:#64748b,color:#000
 </div>
 </div>
 
@@ -536,8 +593,8 @@ flowchart TD
     <div class="card-path">api/v1alpha1/</div>
     <div class="card-desc">Custom resource defining cost optimization rules per MachineDeployment. Includes spec for target, credentials, constraints, aggressiveness, utilization thresholds, rebalancing, and dry-run mode.</div>
     <ul class="card-files">
-      <li class="done"><span class="file-name">scalingpolicy_types.go</span> <span class="file-note">— UtilizationSpec (ScaleUp/DownThreshold), UtilizationStatus</span></li>
-      <li class="done"><span class="file-name">conditions_consts.go</span> <span class="file-note">— 6 conditions, 20 reasons (incl. utilization &amp; scheduling)</span></li>
+      <li class="done"><span class="file-name">scalingpolicy_types.go</span> <span class="file-note">— UtilizationSpec, UtilizationStatus, NodePoolPolicy, NodePoolStatus</span></li>
+      <li class="done"><span class="file-name">conditions_consts.go</span> <span class="file-note">— 7 conditions, 36 reasons (incl. utilization, scheduling &amp; node pool)</span></li>
       <li class="done"><span class="file-name">groupversion_info.go</span> <span class="file-note">— scheme registration</span></li>
       <li class="done"><span class="file-name">zz_generated.deepcopy.go</span> <span class="file-note">— auto-generated (incl. UtilizationStatus)</span></li>
     </ul>
@@ -633,10 +690,12 @@ flowchart TD
       <span class="badge done">Done</span>
     </div>
     <div class="card-path">internal/controller/scalingpolicy_controller.go</div>
-    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Horizontal scaling: adds nodes for pending pods, removes nodes when underutilized (with bin-packing safety). Updates <code>CurrentUtilization</code> status.</div>
+    <div class="card-desc">Main reconciler. Resolves credentials, refreshes pricing, computes utilization direction via <code>determineDirection()</code>, runs selector with direction, creates VPSieMachineTemplate and patches MachineDeployment. Horizontal scaling: adds nodes for pending pods, removes nodes when underutilized (with bin-packing safety). Node pool auto-splitting: detects oversized pods and creates satellite MDs with bigger plans. Updates <code>CurrentUtilization</code> status.</div>
     <ul class="card-files">
       <li class="done"><span class="file-name">scalingpolicy_controller.go</span> <span class="file-note">— Reconcile + determineDirection + switchPlan + reconcileHorizontal</span></li>
+      <li class="done"><span class="file-name">nodepool.go</span> <span class="file-note">— reconcileNodePools + createSatelliteMD + cleanupNodePools + pod resource analysis</span></li>
       <li class="done"><span class="file-name">scalingpolicy_controller_test.go</span> <span class="file-note">— 3 envtest tests</span></li>
+      <li class="done"><span class="file-name">nodepool_test.go</span> <span class="file-note">— 8 tests: satellite creation, max pools, dry-run, horizontal filtering, plan selection</span></li>
     </ul>
   </div>
 
@@ -659,9 +718,9 @@ flowchart TD
       <span class="badge done">Done</span>
     </div>
     <div class="card-path">internal/metrics/metrics.go</div>
-    <div class="card-desc">8 Prometheus metrics auto-registered with controller-runtime registry. Includes utilization and scheduling simulation metrics.</div>
+    <div class="card-desc">10 Prometheus metrics auto-registered with controller-runtime registry. Includes utilization, scheduling simulation, drain, and node pool metrics.</div>
     <ul class="card-files">
-      <li class="done"><span class="file-name">metrics.go</span> <span class="file-note">— selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations</span></li>
+      <li class="done"><span class="file-name">metrics.go</span> <span class="file-note">— selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations, drain_ops, nodepool_ops</span></li>
     </ul>
   </div>
 
@@ -735,12 +794,12 @@ flowchart TD
     <tr><td>Metrics-server integration</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Actual CPU/memory usage, graceful if unavailable</td></tr>
     <tr><td>Utilization threshold evaluation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Asymmetric: upscale on max(sched,actual), downscale on min(sched,actual)</td></tr>
     <tr><td>Scheduling simulation</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Bin-pack + taint/toleration/nodeSelector/nodeAffinity checks</td></tr>
-    <tr><td>Prometheus metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>9 metrics: selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations, drain operations</td></tr>
+    <tr><td>Prometheus metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>10 metrics: selections, rebalancing, savings, price, cache, cpu_util, mem_util, simulations, drain operations, node pool operations</td></tr>
     <tr><td>RBAC (auto-generated)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>From kubebuilder markers on reconciler</td></tr>
     <tr><td>Kustomize deployment</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>CRD + RBAC + manager overlays</td></tr>
     <tr><td>CI pipeline</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Build, lint, multi-arch Docker, cosign</td></tr>
     <tr><td>Unit tests</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>55 tests across vpsie, pricing, selector, workload, utilization, scheduler</td></tr>
-    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>20 tests: vertical (dry-run, plan switch, error) + horizontal (scale-up/down, drain, timeout, stalled, revert)</td></tr>
+    <tr><td>Integration tests (envtest)</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>28 tests: vertical (dry-run, plan switch, error) + horizontal (scale-up/down, drain, timeout, stalled, revert) + node pool (create, max pools, dry-run, oversized filter)</td></tr>
     <tr><td>Horizontal scale-up</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Adds 1 replica when pending pods detected, up to <code>maxReplicas</code></td></tr>
     <tr><td>Horizontal scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Multi-phase: bin-packing sim &rarr; cordon &rarr; drain &rarr; verify rescheduled &rarr; reduce replicas</td></tr>
     <tr><td>Node drain before scale-down</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Evicts pods via <code>policyv1.Eviction</code>, verifies 0 non-system pods + no pending before reducing replicas. Tracks via <code>status.drainingNode</code></td></tr>
@@ -748,6 +807,10 @@ flowchart TD
     <tr><td>Uncordon on abort</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Uncordons drained node when scale-down is aborted (pending pods post-drain or timeout) to prevent wasted capacity</td></tr>
     <tr><td>Stalled rollout detection + auto-revert</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>15min timeout: vertical stalls auto-revert <code>infrastructureRef</code> to previous template; horizontal stalls emit warning only</td></tr>
     <tr><td>Drain metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td><code>DrainOperationsTotal</code> counter: started, completed, aborted, timeout</td></tr>
+    <tr><td>Node pool auto-splitting</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Auto-detects oversized pods, creates satellite MDs with bigger plans. <code>spec.nodePoolPolicy</code> with maxPools and scaleDownDelay</td></tr>
+    <tr><td>Node pool cleanup</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Removes empty satellite MDs after configurable delay (default 10min). Tracks via <code>status.nodePools[]</code></td></tr>
+    <tr><td>Oversized pod filtering</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>When nodePoolPolicy enabled, oversized pods excluded from base MD horizontal scale-up to prevent unnecessary scaling</td></tr>
+    <tr><td>Node pool metrics</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td><code>NodePoolOperationsTotal</code> counter: create, scale-up, delete actions per cluster/MD</td></tr>
     <tr><td>Horizontal stabilization window</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable <code>scaleDownStabilization</code>, rollout-in-progress guard, drain-in-progress guard</td></tr>
     <tr><td>Leader election</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Configurable via <code>--leader-elect</code></td></tr>
     <tr><td>Health probes</td><td><span class="status-icon" style="color:var(--done)">&#9679;</span></td><td>Liveness + readiness on :8083</td></tr>
@@ -803,9 +866,9 @@ flowchart TD
   <div class="card done">
     <div class="card-head">
       <span class="card-title">internal/controller</span>
-      <span class="badge done">20 tests</span>
+      <span class="badge done">28 tests</span>
     </div>
-    <div class="card-desc">Envtest: dry-run, plan switch, target-not-found, scale-up (pending pods, max replicas, dry-run), scale-down (bin-pack, drain+verify, drain abort+uncordon, drain timeout, stabilization, rollout in-progress, rollout stalled+revert, stalled no-revert, clear-on-success). Unit: cooldown, replicas, leader, leastUtilizedNode</div>
+    <div class="card-desc">Envtest: dry-run, plan switch, target-not-found, scale-up (pending pods, max replicas, dry-run), scale-down (bin-pack, drain+verify, drain abort+uncordon, drain timeout, stabilization, rollout in-progress, rollout stalled+revert, stalled no-revert, clear-on-success), node pool (create satellite, max pools, dry-run, oversized filter). Unit: cooldown, replicas, leader, leastUtilizedNode, satelliteMDName, podResourceRequests, podFitsCurrentPlan, findCheapestFittingPlan</div>
   </div>
 </div>
 
@@ -846,6 +909,17 @@ flowchart TD
     e. Stabilization window + rollout-in-progress + drain-in-progress guards
        &bull; Stalled &gt;15min + <span style="color:var(--accent)">previousInfraTemplate</span> set? &rarr; <span style="color:#ef4444">revert</span> infraRef to previous template
        &bull; Stalled &gt;15min + no previous template? &rarr; <span style="color:#f59e0b">alert only</span> (horizontal stall)
+<span style="color:#38bdf8">7b.</span> <strong>reconcileNodePools()</strong> (if <span style="color:var(--accent)">spec.nodePoolPolicy.enabled</span>):
+    a. List pending pods in workload cluster
+    b. Filter to oversized: pods whose requests exceed current plan capacity (after kubelet reserves)
+    c. Group oversized pods by cheapest fitting plan (respects constraints)
+    d. For each plan group:
+       &bull; Satellite MD exists? &rarr; <span style="color:#22c55e">scale up</span> by 1
+       &bull; Under maxPools limit? &rarr; <span style="color:#22c55e">create</span> satellite VPSieMachineTemplate + MachineDeployment
+       &bull; At maxPools? &rarr; <span style="color:#f59e0b">skip</span>, set MaxPoolsReached condition
+    e. <strong>cleanupNodePools()</strong>: for each satellite MD, check workload pods on its nodes
+       &bull; No pods + idle &gt; scaleDownDelay (default 10min) &rarr; <span style="color:#ef4444">delete</span> satellite MD + template
+       &bull; Pods present &rarr; update <span style="color:var(--accent)">lastPodSeen</span> timestamp
 <span style="color:#22c55e"> 8.</span> Run <span style="color:var(--accent)">selector.Select()</span> with direction: filter &rarr; directional filter &rarr; fit &rarr; score &rarr; threshold
 <span style="color:#22c55e"> 9.</span> <span style="color:#f59e0b">If dry-run:</span> log recommendation, set DryRun phase, done
    <span style="color:#22c55e">If switch:</span> create new VPSieMachineTemplate &rarr; patch MD <span style="color:var(--accent)">infrastructureRef</span>
@@ -870,12 +944,14 @@ flowchart TD
     <li><strong>Uncordon on abort:</strong> Whenever a drain is aborted (pending pods or timeout), the node is uncordoned to prevent wasted capacity from a cordoned-but-not-removed node.</li>
     <li><strong>Scale 1 at a time:</strong> Both horizontal scale-up and scale-down change replicas by 1 per reconcile, preventing over-/under-provisioning oscillation.</li>
     <li><strong>Rollout awareness:</strong> Horizontal scaling skips when <code>readyReplicas &lt; currentReplicas</code> (machines still provisioning) or drain is in progress (<code>status.drainingNode</code> set). Uses CAPI v1beta1 deprecated field for accurate ready counts. Stalled vertical rollouts (&gt;15min) auto-revert to previous template; horizontal stalls emit warning events.</li>
-    <li><strong>Observability:</strong> 7 condition types, 30 reason codes, 9 Prometheus metrics provide full visibility into every decision.</li>
+    <li><strong>Node pool isolation:</strong> Satellite MDs labeled with <code>optimization.vpsie.com/satellite-of</code> for tracking. Oversized pods filtered from base MD horizontal scaling to prevent unnecessary scale-up. Max pools limit (default 3) prevents unbounded MD proliferation.</li>
+    <li><strong>Satellite cleanup:</strong> Empty satellite MDs cleaned up after configurable delay (default 10min). Pod presence tracked via <code>status.nodePools[].lastPodSeen</code>. Templates deleted alongside MDs to prevent orphaned resources.</li>
+    <li><strong>Observability:</strong> 7 condition types, 36 reason codes, 10 Prometheus metrics provide full visibility into every decision.</li>
   </ul>
 </div>
 
 <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);color:var(--text-dim);font-size:.8rem;text-align:center;">
-  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 60+ tests passing, 38 source files — Last updated: 2026-03-07 (multi-phase drain)
+  Generated for <code>github.com/vpsieinc/vpsie-cluster-scaler</code> — 68+ tests passing, 40 source files — Last updated: 2026-03-07 (node pool auto-splitting)
 </div>
 
 </body>

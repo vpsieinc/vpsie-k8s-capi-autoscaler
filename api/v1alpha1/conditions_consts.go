@@ -22,6 +22,9 @@ const (
 	// HorizontalScalingCondition indicates the result of horizontal scaling evaluation.
 	HorizontalScalingCondition = "HorizontalScaling"
 
+	// NodePoolCondition indicates the status of automatic node pool management.
+	NodePoolCondition = "NodePool"
+
 	// Reasons
 	ReasonPricingFetchFailed    = "PricingFetchFailed"
 	ReasonPricingDataReady      = "PricingDataReady"
@@ -55,4 +58,10 @@ const (
 	ReasonDrainAborted          = "DrainAborted"
 	ReasonRolloutStalled        = "RolloutStalled"
 	ReasonTemplateReverted      = "TemplateReverted"
+	ReasonNodePoolCreated       = "NodePoolCreated"
+	ReasonNodePoolDeleted       = "NodePoolDeleted"
+	ReasonNodePoolScaleUp       = "NodePoolScaleUp"
+	ReasonMaxPoolsReached       = "MaxPoolsReached"
+	ReasonOversizedPods         = "OversizedPods"
+	ReasonNoFittingPlan         = "NoFittingPlan"
 )

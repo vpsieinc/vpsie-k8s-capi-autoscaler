@@ -78,6 +78,15 @@ var (
 		},
 		[]string{"cluster", "machinedeployment", "result"},
 	)
+
+	// NodePoolOperationsTotal counts satellite node pool operations.
+	NodePoolOperationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "vpsie_scaler_nodepool_operations_total",
+			Help: "Total number of satellite node pool operations by action",
+		},
+		[]string{"cluster", "machinedeployment", "action"},
+	)
 )
 
 func init() {
@@ -91,5 +100,6 @@ func init() {
 		NodeMemoryUtilizationPercent,
 		SchedulingSimulationsTotal,
 		DrainOperationsTotal,
+		NodePoolOperationsTotal,
 	)
 }

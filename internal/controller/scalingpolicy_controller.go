@@ -91,7 +91,9 @@ func (r *ScalingPolicyReconciler) machineDeploymentToScalingPolicy(ctx context.C
 
 	var requests []reconcile.Request
 	for _, policy := range policyList.Items {
-		if policy.Spec.TargetRef.Name == md.Name {
+		targetName := policy.Spec.TargetRef.Name
+		// Match direct target or satellite MDs (label points back to base MD name).
+		if targetName == md.Name || md.Labels[satelliteLabel] == targetName {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: policy.Namespace,
@@ -106,9 +108,9 @@ func (r *ScalingPolicyReconciler) machineDeploymentToScalingPolicy(ctx context.C
 // +kubebuilder:rbac:groups=optimization.vpsie.com,resources=scalingpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=optimization.vpsie.com,resources=scalingpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=optimization.vpsie.com,resources=scalingpolicies/finalizers,verbs=update
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
-// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vpsiemachinetemplates,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vpsiemachinetemplates,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vpsieclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -264,8 +266,13 @@ func (r *ScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// --- Horizontal scaling: adjust replicas based on pending pods ---
-	if err := r.reconcileHorizontal(ctx, &policy, &md, clusterName, utilResult); err != nil {
+	if err := r.reconcileHorizontal(ctx, &policy, &md, clusterName, utilResult, currentPlan); err != nil {
 		klog.V(2).Infof("horizontal scaling error: %v", err)
+	}
+
+	// --- Node pool management: create satellite MDs for oversized pods ---
+	if err := r.reconcileNodePools(ctx, &policy, &md, cache, clusterName, currentPlan, currentTemplate); err != nil {
+		klog.V(2).Infof("node pool error: %v", err)
 	}
 
 	// Use constraints for minimum requirements; override with actual pod requests if higher
@@ -711,12 +718,15 @@ const defaultDrainTimeout = 5 * time.Minute
 const defaultRolloutStallTimeout = 15 * time.Minute
 
 // reconcileHorizontal checks for unschedulable pods and adjusts MachineDeployment replicas.
+// When currentPlan is non-nil and nodePoolPolicy is enabled, oversized pods (those that
+// don't fit the current plan) are excluded — they're handled by reconcileNodePools instead.
 func (r *ScalingPolicyReconciler) reconcileHorizontal(
 	ctx context.Context,
 	policy *optv1.ScalingPolicy,
 	md *clusterv1.MachineDeployment,
 	clusterName string,
 	utilResult *utilization.Result,
+	currentPlan *vpsie.Plan,
 ) error {
 	if !policy.Spec.Horizontal.Enabled {
 		return nil
@@ -734,6 +744,18 @@ func (r *ScalingPolicyReconciler) reconcileHorizontal(
 	pendingPods, err := wc.ListPendingPods(ctx)
 	if err != nil {
 		return fmt.Errorf("listing pending pods: %w", err)
+	}
+
+	// When node pool policy is enabled, filter out oversized pods that don't
+	// fit on the current plan. They'll be handled by reconcileNodePools.
+	if currentPlan != nil && policy.Spec.NodePoolPolicy != nil && policy.Spec.NodePoolPolicy.Enabled {
+		var fittingPods []corev1.Pod
+		for i := range pendingPods {
+			if podFitsCurrentPlan(&pendingPods[i], currentPlan) {
+				fittingPods = append(fittingPods, pendingPods[i])
+			}
+		}
+		pendingPods = fittingPods
 	}
 
 	policy.Status.PendingPods = len(pendingPods)

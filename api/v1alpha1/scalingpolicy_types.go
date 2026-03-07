@@ -185,6 +185,49 @@ type HorizontalSpec struct {
 	ScaleDownStabilization *metav1.Duration `json:"scaleDownStabilization,omitempty"`
 }
 
+// NodePoolPolicy controls automatic creation of separate MachineDeployments
+// for workloads whose resource requests exceed the base plan's capacity.
+type NodePoolPolicy struct {
+	// Enabled enables automatic node pool splitting.
+	// When enabled, the scaler detects pending pods whose resource requests
+	// exceed the current plan's capacity and creates satellite MachineDeployments
+	// with appropriately sized plans.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MaxPools is the maximum number of satellite pools to create.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	MaxPools int `json:"maxPools,omitempty"`
+
+	// ScaleDownDelay is how long a satellite pool must have zero workload pods
+	// before it is deleted. Defaults to 10 minutes.
+	// +optional
+	ScaleDownDelay *metav1.Duration `json:"scaleDownDelay,omitempty"`
+}
+
+// NodePoolStatus tracks a satellite MachineDeployment created for oversized workloads.
+type NodePoolStatus struct {
+	// Name is the name of the satellite MachineDeployment.
+	Name string `json:"name"`
+
+	// PlanID is the VPSie plan identifier used for this pool.
+	PlanID string `json:"planId"`
+
+	// PlanNickname is the human-readable plan name.
+	PlanNickname string `json:"planNickname"`
+
+	// Replicas is the current replica count.
+	Replicas int32 `json:"replicas"`
+
+	// LastPodSeen is the last time a workload pod was observed on this pool's nodes.
+	// +optional
+	LastPodSeen *metav1.Time `json:"lastPodSeen,omitempty"`
+}
+
 // ScalingPolicySpec defines the desired state of ScalingPolicy.
 type ScalingPolicySpec struct {
 	// TargetRef references the MachineDeployment to optimize.
@@ -232,6 +275,12 @@ type ScalingPolicySpec struct {
 	// Horizontal configures horizontal scaling (replica count adjustments).
 	// +optional
 	Horizontal HorizontalSpec `json:"horizontal,omitempty"`
+
+	// NodePoolPolicy controls automatic node pool splitting for heterogeneous workloads.
+	// When enabled, the scaler auto-detects pending pods that don't fit on the current
+	// plan and creates satellite MachineDeployments with bigger plans.
+	// +optional
+	NodePoolPolicy *NodePoolPolicy `json:"nodePoolPolicy,omitempty"`
 
 	// DryRun enables log-only mode without making changes.
 	// +optional
@@ -303,6 +352,11 @@ type ScalingPolicyStatus struct {
 	// before the last plan switch. Used to revert on stalled rollouts.
 	// +optional
 	PreviousInfraTemplate string `json:"previousInfraTemplate,omitempty"`
+
+	// NodePools tracks satellite MachineDeployments created for workloads
+	// that don't fit on the base plan.
+	// +optional
+	NodePools []NodePoolStatus `json:"nodePools,omitempty"`
 
 	// Phase is the current phase of the ScalingPolicy.
 	// +optional
